@@ -55,8 +55,8 @@ macro_rules! functions {
         /// A scene file names nodes in whatever order it likes, and a joint that
         /// pointed forwards used to be silently inert. Retried once per step, over
         /// the few that are unresolved rather than over every joint.
-        pub fn pending(state: &$State) -> Vec<Entity> {
-            let mut out: Vec<Entity> = state
+        pub fn pending(state: &$State, world: &balaur_core::hecs::World) -> Vec<Entity> {
+            let out: Vec<Entity> = state
                 .joint_params
                 .iter()
                 // A joint switched off has params and no handle for ever; retrying it
@@ -66,15 +66,35 @@ macro_rules! functions {
                 })
                 .map(|(entity, _)| *entity)
                 .collect();
-            out.sort_unstable_by_key(|e| e.to_bits());
-            out
+            in_id_order(world, out, "made")
+        }
+
+        /// `joints` in the order both runs of a session agree on. A joint on a node
+        /// with no id is refused, loudly: nothing could order it the same way twice.
+        fn in_id_order(
+            world: &balaur_core::hecs::World,
+            joints: Vec<Entity>,
+            what: &str,
+        ) -> Vec<Entity> {
+            let mut keyed: Vec<(String, Entity)> = joints
+                .into_iter()
+                .filter_map(|e| match balaur_core::ids::order_key(world, e) {
+                    Ok(key) => Some((key, e)),
+                    Err(why) => {
+                        tracing::error!("{why:#}: its {} is not {what}", $component);
+                        None
+                    }
+                })
+                .collect();
+            keyed.sort_by(|a, b| a.0.cmp(&b.0));
+            keyed.into_iter().map(|(_, e)| e).collect()
         }
 
         /// Joints whose reaction force passed their `break_force` this step.
         ///
         /// Checked after the step with the world still borrowed, and acted on after it
         /// is released — the same shape as an event, because a break *is* one.
-        pub(crate) fn broken(state: &$State) -> Vec<Entity> {
+        pub(crate) fn broken(state: &$State, world: &balaur_core::hecs::World) -> Vec<Entity> {
             let mut out = Vec::new();
             for (entity, reference) in &state.joints {
                 if reference.break_force <= 0.0 {
@@ -92,8 +112,7 @@ macro_rules! functions {
                     out.push(*entity);
                 }
             }
-            out.sort_unstable_by_key(|e| e.to_bits());
-            out
+            in_id_order(world, out, "broken")
         }
 
         /// A joint's own data, whichever set it lives in.

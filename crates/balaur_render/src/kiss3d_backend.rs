@@ -17,8 +17,8 @@ use crate::kiss3d_camera::{
     publish_camera_2d,
 };
 use crate::{
-    ClearColorConfig, GridConfig, PostConfig, Renderable, Renderable2d, ScreenshotRequest, Shape,
-    Shape2d, WindowConfig, WindowedBackend,
+    ClearColorConfig, GridConfig, PostConfig, Renderable2d, Renderable3d, ScreenshotRequest,
+    Shape2d, Shape3d, WindowConfig, WindowedBackend,
 };
 
 struct Slot {
@@ -32,6 +32,10 @@ struct Slot {
     skin: Option<MeshSkinSlot>,
     /// The GPU palette, when this mesh skins in the vertex shader.
     palette: Option<crate::skinned_3d::SkinHandle3d>,
+    /// The material's `[surface]` as last pushed onto the node. Held rather
+    /// than pushed every frame because a mirror owns a render target, and
+    /// asserting one every frame would rebuild it every frame.
+    surface: Option<crate::material::Surface>,
 }
 
 /// What a skinned 3D mesh keeps between frames: the vertices as authored,
@@ -100,6 +104,7 @@ struct Frontend {
     device: crate::device::Probe,
     /// One node per authored `light3d`, and the default sun they retire.
     lights: crate::light3d::LightSlots,
+    probes: crate::reflection::ProbeSlots,
     /// The environment last pushed to the window, so an unchanged one costs
     /// no sky decode and no shadow-map resize.
     environment: Option<crate::light3d::Environment>,
@@ -141,6 +146,7 @@ impl Frontend {
             post: crate::post_material::PostChain::default(),
             light_map: crate::light_map::LightMap::new(),
             lights,
+            probes: crate::reflection::ProbeSlots::default(),
             environment: None,
             order_2d: Vec::new(),
             transients: Vec::new(),
@@ -244,6 +250,7 @@ impl Frontend {
         );
         self.lights.sync(app, &mut self.scene);
         crate::light3d::sync_environment(app, window, &mut self.environment);
+        self.probes.sync(app, window);
         self.sync_flat(app, reloaded);
         // The step the frame actually ran, which under --fixed-tick is not
         // the measured one.
@@ -386,6 +393,9 @@ pub async fn run_windowed_async(
     }
     window.set_ime_allowed(true);
     let mut f = Frontend::new();
+    // `[window] max_fps`: vsync already paces a display running at the tick
+    // rate, and this is what caps the loop where it does not.
+    let budget = app.frame_budget();
     let mut last = Instant::now();
     loop {
         // A hidden tab gets no animation frame, so `render` would never
@@ -404,6 +414,14 @@ pub async fn run_windowed_async(
             crate::hidden_tab::sleep().await;
             continue;
         }
+        let now = Instant::now();
+        let dt = (now - last).as_secs_f32().min(0.1);
+        last = now;
+        // Step before the draw: the pass a step opens is what the draw right
+        // after it presents, and the other way round every frame is one late.
+        if !f.step(&mut app, &mut window, dt) {
+            break;
+        }
         let open = window
             .render_chains(
                 Some(&mut f.scene),
@@ -418,14 +436,28 @@ pub async fn run_windowed_async(
         if !open {
             break;
         }
-        let now = Instant::now();
-        let dt = (now - last).as_secs_f32().min(0.1);
-        last = now;
-        if !f.step(&mut app, &mut window, dt) {
-            break;
-        }
+        cap_frame_rate(budget, last);
     }
     Ok(())
+}
+
+/// Sleep out whatever is left of the frame's budget.
+///
+/// A browser has no frame to sleep in — the animation frame it is handed is
+/// already paced — so the cap is a native one.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "pacing the loop against a wall clock; nothing the tick reads"
+)]
+fn cap_frame_rate(budget: Option<std::time::Duration>, started: Instant) {
+    #[cfg(not(target_family = "wasm"))]
+    if let Some(budget) = budget
+        && let Some(left) = budget.checked_sub(started.elapsed())
+    {
+        std::thread::sleep(left);
+    }
+    #[cfg(target_family = "wasm")]
+    let _ = (budget, started);
 }
 
 /// Run the app against a hidden window: real GPU rendering, no OS window.
@@ -458,29 +490,31 @@ pub fn run_offscreen(mut app: App, title: &str, width: u32, height: u32) -> anyh
         // Nothing can close a target that was never shown, and there is no
         // vsync to block on, so the loop runs until the app asks to stop --
         // which `--frames` arranges by inserting a quit-after-N system.
-        while window
-            .render_chains(
-                Some(&mut f.scene),
-                Some(&mut f.scene_2d),
-                Some(&mut f.camera),
-                Some(&mut f.camera_2d),
-                None,
-                &mut chain_of(&mut f.post.film),
-                &mut chain_of(&mut f.post.screen),
-            )
-            .await
-        {
-            if !f.step(&mut app, &mut window, OFFSCREEN_DT) {
+        loop {
+            let step = balaur_core::fixed_dt();
+            if !f.step(&mut app, &mut window, step) {
+                break;
+            }
+            // After the step, as the windowed loop draws: a capture of frame
+            // N is then step N's shell rather than step N-1's.
+            let open = window
+                .render_chains(
+                    Some(&mut f.scene),
+                    Some(&mut f.scene_2d),
+                    Some(&mut f.camera),
+                    Some(&mut f.camera_2d),
+                    None,
+                    &mut chain_of(&mut f.post.film),
+                    &mut chain_of(&mut f.post.screen),
+                )
+                .await;
+            if !open {
                 break;
             }
         }
     });
     Ok(())
 }
-
-/// The fixed step offscreen frames advance by, matching the physics and
-/// animation tick so a screenshot lands on a whole number of simulation steps.
-const OFFSCREEN_DT: f32 = balaur_core::FIXED_DT;
 
 fn apply_clear_color(app: &App, window: &mut Window) {
     let Some(clear) = app.engine.try_resource::<ClearColorConfig>() else {
@@ -496,7 +530,7 @@ fn apply_clear_color(app: &App, window: &mut Window) {
 
 /// The built passes as the fork's chain wants them: a slice of trait objects.
 fn chain_of(
-    built: &mut [crate::post_material::PostMaterial],
+    built: &mut [crate::post_material::Pass],
 ) -> Vec<&mut dyn kiss3d::post_processing::PostProcessingEffect> {
     built
         .iter_mut()
@@ -520,6 +554,15 @@ fn apply_post(app: &App, window: &mut Window) {
     window.set_bloom_enabled(post.bloom);
     window.set_bloom(post.bloom_threshold, post.bloom_intensity);
     window.set_ssao_enabled(post.ssao);
+    if post.ssao {
+        // Only when the pass is on: asking for the settings builds the SSAO
+        // state, and a scene that never occludes should not pay for it.
+        let ssao = window.ssao_settings_mut();
+        ssao.radius = post.occlusion.radius;
+        ssao.bias = post.occlusion.bias;
+        ssao.intensity = post.occlusion.intensity;
+        ssao.power = post.occlusion.power;
+    }
     window.set_ssr_enabled(post.ssr);
     window.set_dof_enabled(post.dof);
 }
@@ -574,7 +617,7 @@ fn apply_window_config(app: &App, window: &Window) {
     config.changed = false;
     // A window mode is a window-manager idea: on a phone the app already owns
     // the screen, and kiss3d exposes no toggle there.
-    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    #[cfg(not(mobile))]
     {
         use balaur_core::project::WindowMode;
         match config.mode {
@@ -618,7 +661,7 @@ fn take_screenshot_if_due(app: &App, window: &Window, frame: u64) {
     {
         let world = app.engine.world();
         for (entity, renderable, global) in
-            &mut world.query::<(Entity, &Renderable, &GlobalTransform)>()
+            &mut world.query::<(Entity, &Renderable3d, &GlobalTransform)>()
         {
             let _ = renderable;
             tracing::debug!("renderable {entity:?} at {}", global.position);
@@ -643,7 +686,7 @@ fn take_screenshot_if_due(app: &App, window: &Window, frame: u64) {
     app.engine.remove_resource::<ScreenshotRequest>();
 }
 
-/// Mirror `Renderable` + `GlobalTransform` into the kiss3d scene graph.
+/// Mirror `Renderable3d` + `GlobalTransform` into the kiss3d scene graph.
 fn sync(
     app: &App,
     scene: &mut SceneNode3d,
@@ -661,7 +704,7 @@ fn sync(
 
     let mut seen: HashSet<Entity> = HashSet::new();
     for (entity, renderable, global) in
-        &mut world.query::<(Entity, &Renderable, &GlobalTransform)>()
+        &mut world.query::<(Entity, &Renderable3d, &GlobalTransform)>()
     {
         seen.insert(entity);
         // Read once: the ancestors' tint, visibility and material come off
@@ -683,6 +726,14 @@ fn sync(
             }
             None => true,
         };
+        // The material a node effectively draws with: its own, or the one
+        // an ancestor handed down.
+        let inherited = appearance.material.reference();
+        let reference = if owns_material {
+            renderable.material.as_str()
+        } else {
+            &inherited
+        };
         if rebuild {
             if let Some(mut old) = slots.remove(&entity) {
                 old.node.remove();
@@ -691,15 +742,15 @@ fn sync(
                 // Built by the mesher rather than by kiss3d: the triangles a
                 // collider is fitted to and a ray is picked against are the
                 // ones uploaded here.
-                Shape::Solid(solid) => (upload_geometry(scene, &solid.build()), None, None),
+                Shape3d::Solid(solid) => (upload_geometry(scene, &solid.build()), None, None),
                 // A boolean's result, already worked out this tick.
-                Shape::Built => match renderable.built.as_deref() {
+                Shape3d::Built => match renderable.built.as_deref() {
                     Some(mesh) if !mesh.indices.is_empty() => {
                         (upload_geometry(scene, mesh), None, None)
                     }
                     _ => continue,
                 },
-                Shape::Mesh => match upload_mesh(app, scene, renderable) {
+                Shape3d::Mesh => match upload_mesh(app, scene, renderable) {
                     Some(built) => built,
                     // Nothing to draw yet, and `upload_mesh` said why.
                     None => continue,
@@ -707,12 +758,6 @@ fn sync(
             };
             // After the texture: a material reads it, and kiss3d's own
             // material stays on a node whose shader would not link.
-            let inherited = appearance.material.reference();
-            let reference = if owns_material {
-                renderable.material.as_str()
-            } else {
-                &inherited
-            };
             let custom = materials.for_node(app, reference, &channel);
             let mut palette = None;
             if let Some(material) = custom {
@@ -728,6 +773,7 @@ fn sync(
                     inherited: appearance.material,
                     skin,
                     palette,
+                    surface: None,
                 },
             );
         }
@@ -748,6 +794,11 @@ fn sync(
             .set_visible(visible)
             .set_casts_shadows(renderable.shadows)
             .set_light_layers(renderable.layers);
+        let surface = crate::material::surface_of(&app.engine, reference);
+        if slot.surface != Some(surface) {
+            apply_surface(&mut slot.node, &surface);
+            slot.surface = Some(surface);
+        }
         // How far the mesh is blended towards each of its shapes, this tick.
         if let Ok(morphs) = world.get::<&crate::MorphWeights>(entity) {
             slot.node.set_morph_weights(&morphs.weights);
@@ -764,6 +815,36 @@ fn sync(
             false
         }
     });
+}
+
+/// Push a material's `[surface]` onto the node it draws: how its alpha is
+/// read, whether both sides draw, and what it refracts.
+///
+/// These are the node's business rather than the shader's because they decide
+/// which pass it joins, and the scene walk that collects the refracting
+/// surfaces runs before any material is asked anything.
+fn apply_surface(node: &mut SceneNode3d, surface: &crate::material::Surface) {
+    use crate::material::AlphaMode;
+    node.set_alpha_mode(match surface.alpha {
+        AlphaMode::Opaque => kiss3d::scene::AlphaMode::Opaque,
+        AlphaMode::Mask => kiss3d::scene::AlphaMode::Mask(surface.alpha_cutoff),
+        AlphaMode::Blend => kiss3d::scene::AlphaMode::Blend,
+    });
+    node.enable_backface_culling(!surface.double_sided);
+    // A mirror owns a render target the window resizes and draws into, so
+    // one is made when the surface says so and dropped when it stops.
+    let [x, y, z] = surface.mirror_normal;
+    node.set_reflector(surface.mirror.then(|| {
+        kiss3d::renderer::Reflector::new()
+            .with_local_normal(glamx::Vec3::new(x, y, z))
+            .with_intensity(surface.mirror_intensity)
+            .with_normal_falloff(surface.mirror_falloff)
+    }));
+    node.set_transmission(surface.transmission);
+    node.set_ior(surface.ior);
+    node.set_thickness(surface.thickness);
+    let [r, g, b, _] = surface.attenuation_color;
+    node.set_attenuation(Color::new(r, g, b, 1.0), surface.attenuation_distance);
 }
 
 /// Hand a mesh's triangles to kiss3d as a static node. Normals and UVs are
@@ -797,7 +878,7 @@ fn upload_geometry(scene: &mut SceneNode3d, data: &balaur_core::mesh::MeshData) 
 fn upload_mesh(
     app: &App,
     scene: &mut SceneNode3d,
-    renderable: &Renderable,
+    renderable: &Renderable3d,
 ) -> Option<(
     SceneNode3d,
     Option<MeshSkinSlot>,

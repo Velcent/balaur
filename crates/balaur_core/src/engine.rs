@@ -40,12 +40,26 @@ pub(crate) struct EngineInner {
     /// subsystem's awaitable ids share a namespace and a wake can never
     /// resume the wrong task.
     pub(crate) tokens: Cell<u64>,
+    /// Bumped each time the app drops its fixed-step remainder at a session
+    /// boundary; see [`Engine::step_restarts`].
+    pub(crate) step_restarts: Cell<u64>,
     /// The subtree a debugger treats as the game. `None` means the whole tree.
     pub(crate) debug_scope: Cell<Option<hecs::Entity>>,
     pub(crate) frozen: Cell<bool>,
     /// A paused replay, held apart from `frozen` so releasing one does not
     /// release the other: a breakpoint inside a replay is both at once.
     pub(crate) replay_hold: Cell<bool>,
+    /// The game's own pause, which a script owns and the debugger's freeze
+    /// knows nothing about.
+    pub(crate) paused: Cell<bool>,
+    /// A pause or a resume nobody has announced yet, for `on_paused`.
+    pub(crate) pause_change: Cell<Option<bool>>,
+    /// What measured frame time is multiplied by before it is owed to the
+    /// fixed step: slow motion, fast forward, and 0 for neither.
+    pub(crate) time_scale: Cell<f32>,
+    /// How far the frame being drawn sits between the last fixed step and
+    /// the next, 0 to 1. Render-side alone; see [`crate::interpolate`].
+    pub(crate) frame_alpha: Cell<f32>,
 }
 
 impl Engine {
@@ -65,9 +79,14 @@ impl Engine {
                 quit: Cell::new(false),
                 exit_code: Cell::new(0),
                 tokens: Cell::new(1),
+                step_restarts: Cell::new(0),
                 debug_scope: Cell::new(None),
                 frozen: Cell::new(false),
                 replay_hold: Cell::new(false),
+                paused: Cell::new(false),
+                pause_change: Cell::new(None),
+                time_scale: Cell::new(1.0),
+                frame_alpha: Cell::new(0.0),
             }),
         }
     }
@@ -116,6 +135,20 @@ impl Engine {
     /// same. Anything else calling this hands two live operations one id.
     pub fn set_tokens(&self, next: u64) {
         self.inner.tokens.set(next);
+    }
+
+    /// How many times the fixed step has restarted from a frame boundary: a
+    /// recording starting, and a replay starting. A plugin that keeps its own
+    /// accumulator drops its remainder when this moves, as the app drops its
+    /// own, or a session replayed in a long-lived process takes different steps.
+    pub fn step_restarts(&self) -> u64 {
+        self.inner.step_restarts.get()
+    }
+
+    pub(crate) fn restart_steps(&self) {
+        self.inner
+            .step_restarts
+            .set(self.inner.step_restarts.get() + 1);
     }
 
     pub fn remove_resource<T: 'static>(&self) {
@@ -233,6 +266,58 @@ impl Engine {
     pub fn frozen_root(&self) -> Option<hecs::Entity> {
         (self.inner.frozen.get() || self.inner.replay_hold.get())
             .then(|| self.inner.debug_scope.get().unwrap_or_else(|| self.root()))
+    }
+
+    /// Pause or resume the game: every node whose `process` mode is
+    /// `pausable` stops ticking, physics holds both worlds, and the frame
+    /// loop keeps drawing. `always` and `when_paused` subtrees are what runs
+    /// through it.
+    pub fn set_paused(&self, paused: bool) {
+        if self.inner.paused.get() == paused {
+            return;
+        }
+        self.inner.paused.set(paused);
+        self.inner.pause_change.set(Some(paused));
+    }
+
+    #[must_use]
+    pub fn paused(&self) -> bool {
+        self.inner.paused.get()
+    }
+
+    /// The change `on_paused` has yet to announce, taken so it is announced
+    /// once. A pause and a resume inside one frame cancel to the last state,
+    /// which is the one a script would have been told about anyway.
+    pub fn take_pause_change(&self) -> Option<bool> {
+        self.inner.pause_change.take()
+    }
+
+    /// Multiply wall-clock time by `scale` before the simulation is owed it:
+    /// half takes half the fixed steps, double takes twice, each still a
+    /// whole fixed step. Negative is refused; zero is a pause that
+    /// keeps every node ticking with no time passing.
+    ///
+    /// A replay and a rollback session drive by tick and ignore it: a scale
+    /// is a wall-clock matter, not simulation state.
+    pub fn set_time_scale(&self, scale: f32) {
+        self.inner.time_scale.set(scale.max(0.0));
+    }
+
+    #[must_use]
+    pub fn time_scale(&self) -> f32 {
+        self.inner.time_scale.get()
+    }
+
+    /// Where the frame being drawn sits between the last fixed step and the
+    /// next, 0 to 1. Written by the app once per frame, read by the scene
+    /// sync and by nothing a script can reach.
+    pub fn set_frame_alpha(&self, alpha: f32) {
+        self.inner.frame_alpha.set(alpha.clamp(0.0, 1.0));
+    }
+
+    #[must_use]
+    pub fn frame_alpha(&self) -> f32 {
+        self.inner.frame_alpha.get()
     }
 
     pub fn quit_requested(&self) -> bool {

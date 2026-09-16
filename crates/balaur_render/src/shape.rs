@@ -10,7 +10,7 @@ use balaur_plugin::Registry;
 use balaur_script::{Bindings, BindingsExt, NodeId};
 
 use crate::{
-    Renderable, Renderable2d, Shape, Shape2d, color_from_params, color_to_toml, set_color,
+    Renderable2d, Renderable3d, Shape2d, Shape3d, color_from_params, color_to_toml, set_color,
     set_polyline, set_shape, set_shape2d,
 };
 
@@ -21,7 +21,7 @@ pub(crate) fn install_shape_api(m: &mut dyn Bindings<Engine>) {
         ("set_rect", &["shape2d"], "", "Draw the node as a rectangle from its two half-extents, in world units, replacing any other 2D shape."),
     ]);
     m.function("set_ball", |eng: &Engine, (node, radius): (NodeId, f32)| {
-        set_shape(eng, entity_of(node)?, Shape::Solid(Solid::ball(radius)))
+        set_shape(eng, entity_of(node)?, Shape3d::Solid(Solid::ball(radius)))
     });
     m.function(
         "set_cuboid",
@@ -29,7 +29,7 @@ pub(crate) fn install_shape_api(m: &mut dyn Bindings<Engine>) {
             set_shape(
                 eng,
                 entity_of(node)?,
-                Shape::Solid(Solid::cuboid(hx, hy, hz)),
+                Shape3d::Solid(Solid::cuboid(hx, hy, hz)),
             )
         },
     );
@@ -71,27 +71,43 @@ pub(crate) mod words {
     pub(crate) const NGON: &str = p::NGON;
     pub(crate) const POLYLINE: &str = "polyline";
     /// The 2D primitives, and the chain of points that is not one of them.
-    /// A circle is not a ball and a rect is not a cuboid.
-    pub(crate) const SHAPES_2D: &[&str] = &[CIRCLE, RECT, CAPSULE, ELLIPSE, STAR, NGON, POLYLINE];
+    ///
+    /// Taken from the mesher's own list rather than respelled, so a kind core
+    /// learns to build is a kind a scene may name; `polyline` is appended
+    /// because it follows a `mesh` or `path2d` asset instead of params.
+    pub(crate) fn shapes_2d() -> Vec<&'static str> {
+        p::FLATS.iter().copied().chain([POLYLINE]).collect()
+    }
 
     /// Two more an occluder may read off a collider's params. `balaur_render`
     /// does not depend on `balaur_physics`, so the words are spelled here too.
     pub(crate) const TRIANGLE: &str = "triangle";
     pub(crate) const SEGMENT: &str = "segment";
 
+    /// Which camera a `camera` node drives.
     pub(crate) const PERSPECTIVE: &str = "3d";
     pub(crate) const ORTHOGRAPHIC: &str = "2d";
-    /// Which camera a `camera` node drives.
-    pub(crate) const CAMERA_KINDS: &[&str] = &[PERSPECTIVE, ORTHOGRAPHIC];
 
+    /// The passes a `camera`'s `post` list may name; any other name in it is a
+    /// `material` asset.
     pub(crate) const BLOOM: &str = "bloom";
     pub(crate) const SSAO: &str = "ssao";
     pub(crate) const SSR: &str = "ssr";
     pub(crate) const DOF: &str = "dof";
     pub(crate) const TONEMAP: &str = "tonemap";
-    /// The passes a `camera`'s `post` list may name; any other name in it is a
-    /// `material` asset.
-    pub(crate) const POST_EFFECTS: &[&str] = &[BLOOM, SSAO, SSR, DOF, TONEMAP];
+    pub(crate) const FXAA: &str = "fxaa";
+    pub(crate) const SHARPEN: &str = "sharpen";
+    pub(crate) const VIGNETTE: &str = "vignette";
+    pub(crate) const ABERRATION: &str = "aberration";
+    pub(crate) const GRAIN: &str = "grain";
+    pub(crate) const PIXELATE: &str = "pixelate";
+    /// The finishing passes the engine ships as post-process materials,
+    /// rather than as flags on the pipeline. Named in the order they read
+    /// best stacked, which is also the order the shader declares them.
+    pub(crate) const FINISHES: &[&str] = &[VIGNETTE, ABERRATION, GRAIN, PIXELATE];
+    pub(crate) const POST_EFFECTS: &[&str] = &[
+        BLOOM, SSAO, SSR, DOF, FXAA, SHARPEN, TONEMAP, VIGNETTE, ABERRATION, GRAIN, PIXELATE,
+    ];
 
     pub(crate) const POINT: &str = "point";
     pub(crate) const DIRECTIONAL: &str = "directional";
@@ -107,6 +123,12 @@ pub(crate) mod words {
     pub(crate) const NONE: &str = "none";
     /// How fog thickens with distance, plus the word for no fog at all.
     pub(crate) const FOG_KINDS: &[&str] = &[NONE, LINEAR, EXPONENTIAL, EXPONENTIAL_SQUARED];
+
+    pub(crate) const OPAQUE: &str = "opaque";
+    pub(crate) const MASK: &str = "mask";
+    pub(crate) const BLEND: &str = "blend";
+    /// How a surface's alpha is read: ignored, a cutout, or a blend.
+    pub(crate) const ALPHA_MODES: &[&str] = &[OPAQUE, MASK, BLEND];
 
     pub(crate) const ACES: &str = "aces";
     pub(crate) const REINHARD: &str = "reinhard";
@@ -136,11 +158,12 @@ pub(crate) const CONSTANTS: &[(&str, &str)] = &[
     ("SHAPE_STAR", words::STAR),
     ("SHAPE_NGON", words::NGON),
     ("SHAPE_POLYLINE", words::POLYLINE),
-    ("CAMERA_3D", words::PERSPECTIVE),
-    ("CAMERA_2D", words::ORTHOGRAPHIC),
     ("LIGHT_POINT", words::POINT),
     ("LIGHT_DIRECTIONAL", words::DIRECTIONAL),
     ("LIGHT_SPOT", words::SPOT),
+    ("ALPHA_OPAQUE", words::OPAQUE),
+    ("ALPHA_MASK", words::MASK),
+    ("ALPHA_BLEND", words::BLEND),
     ("FOG_NONE", words::NONE),
     ("FOG_LINEAR", words::LINEAR),
     ("FOG_EXPONENTIAL", words::EXPONENTIAL),
@@ -174,8 +197,17 @@ pub(crate) mod keys {
     pub(crate) const ANGLE: &str = "angle";
     pub(crate) const B: &str = "b";
     pub(crate) const BILLBOARD: &str = "billboard";
+    pub(crate) const ABERRATION_AMOUNT: &str = "aberration_amount";
     pub(crate) const BLOOM_INTENSITY: &str = "bloom_intensity";
     pub(crate) const BLOOM_THRESHOLD: &str = "bloom_threshold";
+    pub(crate) const GRAIN_AMOUNT: &str = "grain_amount";
+    pub(crate) const PIXELATE_SIZE: &str = "pixelate_size";
+    pub(crate) const SSAO_BIAS: &str = "ssao_bias";
+    pub(crate) const SSAO_INTENSITY: &str = "ssao_intensity";
+    pub(crate) const SSAO_POWER: &str = "ssao_power";
+    pub(crate) const SSAO_RADIUS: &str = "ssao_radius";
+    pub(crate) const VIGNETTE_AMOUNT: &str = "vignette_amount";
+    pub(crate) const VIGNETTE_ROUNDNESS: &str = "vignette_roundness";
     pub(crate) const C: &str = "c";
     pub(crate) const CELLS: &str = "cells";
     pub(crate) const ORIGIN: &str = "origin";
@@ -191,6 +223,7 @@ pub(crate) mod keys {
     pub(crate) const DOUBLE_SIDED: &str = "double_sided";
     pub(crate) const EMITTING: &str = "emitting";
     pub(crate) const EXPLOSIVENESS: &str = "explosiveness";
+    pub(crate) const FALLOFF: &str = "falloff";
     pub(crate) const FAMILY: &str = "family";
     pub(crate) const FLIP_X: &str = "flip_x";
     pub(crate) const FLIP_Y: &str = "flip_y";
@@ -203,7 +236,9 @@ pub(crate) mod keys {
     pub(crate) const GRAVITY: &str = "gravity";
     pub(crate) const HALF_EXTENTS: &str = p::HALF_EXTENTS;
     pub(crate) const HEIGHT: &str = p::HEIGHT;
+    pub(crate) const IMAGE: &str = "image";
     pub(crate) const INTENSITY: &str = "intensity";
+    pub(crate) const MIRROR: &str = "mirror";
     pub(crate) const KIND: &str = p::KIND;
     pub(crate) const LETTER_SPACING: &str = "letter_spacing";
     pub(crate) const LIFETIME: &str = "lifetime";
@@ -220,6 +255,7 @@ pub(crate) mod keys {
     pub(crate) const OUTLINE_SIZE: &str = "outline_size";
     pub(crate) const PIXELS_PER_UNIT: &str = "pixels_per_unit";
     pub(crate) const POST: &str = "post";
+    pub(crate) const ROTATION: &str = "rotation";
     pub(crate) const RADIUS: &str = p::RADIUS;
     pub(crate) const RATE: &str = "rate";
     pub(crate) const REGION_ORIGIN: &str = "region_origin";
@@ -273,15 +309,15 @@ pub(crate) fn options(words: &[&str]) -> String {
         .join(", ")
 }
 
-/// The `Shape` a `shape` component's params describe. The reader is the
+/// The `Shape3d` a `shape` component's params describe. The reader is the
 /// mesher's, so what a scene names is what a mesh can be built from.
-fn shape_from_params(params: &toml::Value) -> Result<Shape> {
-    Ok(Shape::Solid(Solid::from_params(params)?))
+fn shape_from_params(params: &toml::Value) -> Result<Shape3d> {
+    Ok(Shape3d::Solid(Solid::from_params(params)?))
 }
 
 /// A `shape` component's params for `shape`, or `None` when another
 /// component owns it: a mesh is saved by `mesh`, not by this.
-fn shape_to_params(shape: Shape) -> Option<toml::Value> {
+fn shape_to_params(shape: Shape3d) -> Option<toml::Value> {
     Some(shape.solid()?.to_params())
 }
 
@@ -326,12 +362,12 @@ pub(crate) fn register_shape_component(reg: &mut Registry<'_>) {
             }),
             remove: Box::new(|eng, entity| {
                 let mut world = eng.world_mut();
-                let _ = world.remove_one::<Renderable>(entity);
+                let _ = world.remove_one::<Renderable3d>(entity);
                 Ok(())
             }),
             get: Box::new(|eng, entity| {
                 let world = eng.world();
-                let renderable = world.get::<&Renderable>(entity).ok()?;
+                let renderable = world.get::<&Renderable3d>(entity).ok()?;
                 let mut params = shape_to_params(renderable.shape)?;
                 if let Some(map) = params.as_table_mut() {
                     map.insert(k::COLOR.into(), color_to_toml(renderable.color));
@@ -402,7 +438,7 @@ pub(crate) fn register_shape2d_component(reg: &mut Registry<'_>) {
             schema: ComponentDef::parse_schema(
                 "shape2d",
                 &balaur_core::components::ComponentDef::schema(&[
-                    (k::KIND, &format!(r#"{{ type = "enum", default = "{}", options = [{}], description = "Rendered 2D shape" }}"#, words::RECT, options(words::SHAPES_2D))),
+                    (k::KIND, &format!(r#"{{ type = "enum", default = "{}", options = [{}], description = "Rendered 2D shape" }}"#, words::RECT, options(&words::shapes_2d()))),
                     (k::RADIUS, r#"{ type = "float", default = 0.5, min = 0.01, description = "Radius, when kind is circle, capsule, star or ngon" }"#),
                     (k::HEIGHT, r#"{ type = "float", default = 1.0, min = 0.01, description = "Length along y of the straight part, when kind is capsule" }"#),
                     (k::MESH, r#"{ type = "asset", asset = "mesh", default = "", description = "Where a polyline's points come from: a `mesh` asset's vertices, or a `path2d` asset, which is sampled into points and so draws as a stroked curve" }"#),

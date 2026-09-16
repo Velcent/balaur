@@ -18,7 +18,7 @@ use crate::tween::{Tween, TweenId};
 
 /// The simulation tick animation advances on, and the ceiling on catch-up
 /// steps: both are core's, so animation falls behind exactly as physics does.
-pub(crate) use balaur_core::{FIXED_DT, MAX_SUBSTEPS};
+pub(crate) use balaur_core::{fixed_dt, max_substeps};
 
 /// The asset type name every clip is parsed through, and the one this crate
 /// registers.
@@ -138,7 +138,7 @@ impl Playback {
 }
 
 /// Every node's playback and every running tween, plus the fixed-step
-/// accumulator: state this plugin owns outright, in the shape `PhysicsState`
+/// accumulator: state this plugin owns outright, in the shape `PhysicsState3d`
 /// established.
 #[derive(Default)]
 pub struct AnimationState {
@@ -162,6 +162,8 @@ pub struct AnimationState {
     /// `accumulator` because the modifier system runs after the playhead has
     /// already spent that one.
     pub(crate) jiggle_accumulator: f32,
+    /// The [`Engine::step_restarts`] both accumulators were last emptied at.
+    pub(crate) step_restarts: u64,
     /// The asset generation these players' clips were resolved at. When the
     /// cache moves past it — a file saved in dev mode, an editor writing a
     /// clip — every live playback re-resolves and keeps its playhead.
@@ -169,6 +171,20 @@ pub struct AnimationState {
     /// Every node running a state machine, keyed by that node. Ordered like
     /// `players`, and for the same reason.
     pub machines: DetHashMap<Entity, crate::machine::MachineRun>,
+}
+
+impl AnimationState {
+    /// Drop both fixed-step remainders when the app dropped its own: a session
+    /// starting, or a replay of one. Left alone, a replay in a process that ran
+    /// before it takes a different number of steps than its recording did.
+    pub(crate) fn honour_step_restart(&mut self, eng: &Engine) {
+        let restarts = eng.step_restarts();
+        if restarts != self.step_restarts {
+            self.step_restarts = restarts;
+            self.accumulator = 0.0;
+            self.jiggle_accumulator = 0.0;
+        }
+    }
 }
 
 /// Run `f` over one node's playback, or answer `None` when it has none.

@@ -476,31 +476,49 @@ macro_rules! node_bundle {
     };
 }
 
+/// The stable id of the engine's root, the one node no file and no spawn names.
+pub const ROOT_ID: &str = "root";
+
+/// The root, which carries the id counter every node under it is minted from.
 pub(crate) fn spawn_root(world: &mut World) -> Entity {
-    world.spawn(node_bundle!("Root", Transform::identity()))
+    world.spawn(node_bundle!(
+        "Root",
+        Transform::identity(),
+        crate::components::StableId(String::from(ROOT_ID)),
+        crate::ids::IdAllocator::default()
+    ))
 }
 
-/// Spawn a new node under `parent`.
+/// Spawn a new node under `parent`, with the next stable id.
 pub fn spawn_node(world: &mut World, name: &str, parent: Entity) -> Entity {
-    let entity = world.spawn(node_bundle!(name, Parent(parent), Transform::identity()));
-    attach(world, parent, name, entity);
-    entity
+    let id = crate::ids::mint_under(world, parent);
+    spawn_node_with_id(world, name, parent, id)
 }
 
-/// [`spawn_node`] without a local `Transform`, for a node that only groups or
-/// only draws.
+/// A node with the id a scene file gave it, and no local `Transform`: one that
+/// only groups or only draws.
 ///
 /// What a scene file naming no `[nodes.transform]` gets: the component is
 /// absent rather than at its defaults, the same way an absent `[nodes.sprite]`
 /// means no sprite. Spawning it bare rather than removing one afterwards is
 /// what keeps the archetype move out of loading a scene.
-pub fn spawn_node_bare(world: &mut World, name: &str, parent: Entity) -> Entity {
-    let entity = world.spawn(node_bundle!(name, Parent(parent)));
+pub fn spawn_node_bare_with_id(
+    world: &mut World,
+    name: &str,
+    parent: Entity,
+    id: String,
+) -> Entity {
+    let entity = world.spawn(node_bundle!(
+        name,
+        Parent(parent),
+        crate::components::StableId(id)
+    ));
     attach(world, parent, name, entity);
     entity
 }
 
-/// [`spawn_node`] with a stable id, in one spawn.
+/// A node with an id it already has: a scene file's, or a snapshot's. Nothing
+/// is minted, so the counter moves only for nodes that are new.
 pub fn spawn_node_with_id(world: &mut World, name: &str, parent: Entity, id: String) -> Entity {
     let entity = world.spawn(node_bundle!(
         name,
@@ -517,8 +535,14 @@ pub fn spawn_node_with_id(world: &mut World, name: &str, parent: Entity, id: Str
 /// Where a snapshot puts a freed node back: the digest walks the tree in
 /// order, so a node restored as the last sibling reads as a divergence made
 /// of nothing but ordering.
-pub fn spawn_node_at(world: &mut World, name: &str, parent: Entity, index: usize) -> Entity {
-    let entity = spawn_node(world, name, parent);
+pub fn spawn_node_at(
+    world: &mut World,
+    name: &str,
+    parent: Entity,
+    index: usize,
+    id: String,
+) -> Entity {
+    let entity = spawn_node_with_id(world, name, parent, id);
     move_child_to(world, parent, entity, index);
     entity
 }
@@ -734,6 +758,16 @@ thread_local! {
 
 /// Recompute every `GlobalTransform` and `GlobalAppearance` from the root down.
 pub fn propagate_transforms(world: &mut World, root: Entity) {
+    propagate_transforms_at(world, root, 1.0);
+}
+
+/// [`propagate_transforms`], placing every node that draws between fixed
+/// steps `alpha` of the way along the pair of poses it kept.
+///
+/// `alpha` of 1.0 is the tick's own pose for every node, which is what a
+/// caller with no frame to place wants.
+pub fn propagate_transforms_at(world: &mut World, root: Entity, alpha: f32) {
+    let blending = alpha < 1.0;
     PROPAGATE_STACK.with_borrow_mut(|stack| {
         stack.clear();
         stack.push((
@@ -742,9 +776,14 @@ pub fn propagate_transforms(world: &mut World, root: Entity) {
             GlobalAppearance::identity(),
         ));
         while let Some((entity, parent_global, parent_appearance)) = stack.pop() {
-            let global = match world.get::<&Transform>(entity) {
-                Ok(local) => parent_global.mul(&local),
-                Err(_) => parent_global,
+            let drawn = blending
+                .then(|| world.get::<&crate::interpolate::Interpolation>(entity).ok())
+                .flatten()
+                .map(|kept| kept.pose(alpha));
+            let global = match (drawn, world.get::<&Transform>(entity)) {
+                (Some(local), _) => parent_global.mul(&local),
+                (None, Ok(local)) => parent_global.mul(&local),
+                (None, Err(_)) => parent_global,
             };
             if let Ok(mut slot) = world.get::<&mut GlobalTransform>(entity) {
                 *slot = global;

@@ -14,7 +14,7 @@ cannot drift from what scripts actually see.
 | [`audio`](#audio) | 19 | 0 | the engine |
 | [`debugger`](#debugger) | 9 | 4 | the engine |
 | [`encoding`](#encoding) | 2 | 0 | the engine |
-| [`engine`](#engine) | 20 | 0 | the engine |
+| [`engine`](#engine) | 25 | 0 | the engine |
 | [`events`](#events) | 6 | 0 | the engine |
 | [`export`](#export) | 5 | 0 | the engine |
 | [`fs`](#fs) | 9 | 0 | the engine |
@@ -23,17 +23,19 @@ cannot drift from what scripts actually see.
 | [`geometry3d`](#geometry3d) | 6 | 0 | the engine |
 | [`hash`](#hash) | 2 | 0 | the engine |
 | [`http`](#http) | 1 | 0 | the engine |
-| [`import`](#import) | 2 | 0 | the engine |
+| [`import`](#import) | 8 | 0 | the engine |
 | [`input`](#input) | 46 | 190 | the engine |
 | [`json`](#json) | 2 | 0 | the engine |
 | [`log`](#log) | 5 | 0 | the engine |
 | [`math`](#math) | 24 | 3 | the engine |
-| [`node`](#node) | 49 | 0 | the engine |
+| [`node`](#node) | 55 | 0 | the engine |
 | [`physics`](#physics) | 14 | 0 | the engine |
 | [`physics2d`](#physics2d) | 48 | 49 | the engine |
 | [`physics3d`](#physics3d) | 70 | 62 | the engine |
 | [`platform`](#platform) | 11 | 0 | the engine |
-| [`render`](#render) | 58 | 30 | the engine |
+| [`project`](#project) | 11 | 0 | the engine |
+| [`release`](#release) | 4 | 0 | the engine |
+| [`render`](#render) | 58 | 31 | the engine |
 | [`replay`](#replay) | 17 | 4 | the engine |
 | [`rng`](#rng) | 5 | 0 | the engine |
 | [`rollback`](#rollback) | 2 | 0 | the engine |
@@ -45,7 +47,7 @@ cannot drift from what scripts actually see.
 | [`strings`](#strings) | 6 | 0 | the engine |
 | [`task`](#task) | 3 | 0 | the engine |
 | [`toml`](#toml) | 3 | 0 | the engine |
-| [`ui`](#ui) | 61 | 65 | the engine |
+| [`ui`](#ui) | 64 | 65 | the engine |
 | [`web`](#web) | 7 | 0 | the engine |
 | [`websocket`](#websocket) | 3 | 0 | the engine |
 
@@ -84,7 +86,7 @@ cannot drift from what scripts actually see.
 
 ## `engine`
 
-**Functions:** `args`, `dark_mode`, `delta`, `device_id`, `focused`, `has_plugin`, `open_url`, `platform`, `plugin_version`, `plugins`, `profile_scripts`, `quit`, `reload_script`, `reveal`, `script_costs`, `tick`, `time`, `timings`, `unix_time`, `user_data_dir`
+**Functions:** `args`, `dark_mode`, `delta`, `device_id`, `focused`, `has_plugin`, `open_url`, `paused`, `platform`, `plugin_version`, `plugins`, `profile_scripts`, `quit`, `reload_script`, `reveal`, `script_costs`, `set_paused`, `set_time_scale`, `tick`, `tick_hz`, `time`, `time_scale`, `timings`, `unix_time`, `user_data_dir`
 
 ## `events`
 
@@ -120,7 +122,7 @@ cannot drift from what scripts actually see.
 
 ## `import`
 
-**Functions:** `file`, `handles`
+**Functions:** `cancel`, `choose`, `file`, `handles`, `into`, `listen`, `running`, `start`
 
 ## `input`
 
@@ -179,7 +181,7 @@ cannot drift from what scripts actually see.
 
 ## `node`
 
-**Functions:** `add_child`, `add_tag`, `attach_script`, `call`, `call_async`, `children`, `component_names`, `descendants`, `detach_script`, `emit`, `get_component`, `get_node`, `global_material`, `global_position`, `global_rotation_euler`, `global_scale`, `global_tint`, `global_visible`, `global_z_index`, `go`, `has_component`, `has_method`, `has_tag`, `is_valid`, `material`, `name`, `parent`, `patch_component`, `path`, `queue_free`, `remove_component`, `remove_tag`, `script_path`, `set_component`, `set_material`, `set_name`, `set_parent`, `set_sibling_index`, `set_tint`, `set_visible`, `set_z_index`, `sibling_index`, `stable_id`, `state`, `tags`, `tint`, `translate`, `visible`, `z_index`
+**Functions:** `add_child`, `add_tag`, `attach_script`, `call`, `call_async`, `children`, `component_names`, `descendants`, `detach_script`, `emit`, `get_component`, `get_node`, `global_material`, `global_position`, `global_rotation_euler`, `global_scale`, `global_tint`, `global_visible`, `global_z_index`, `go`, `has_component`, `has_method`, `has_tag`, `interpolate`, `is_valid`, `material`, `name`, `parent`, `patch_component`, `path`, `process`, `queue_free`, `remove_component`, `remove_tag`, `reset_interpolation`, `script_path`, `set_component`, `set_interpolate`, `set_material`, `set_name`, `set_parent`, `set_process`, `set_sibling_index`, `set_tint`, `set_visible`, `set_z_index`, `sibling_index`, `stable_id`, `state`, `tags`, `ticking`, `tint`, `translate`, `visible`, `z_index`
 
 ## `physics`
 
@@ -259,16 +261,25 @@ cannot drift from what scripts actually see.
 
 **Functions:** `backend`, `cloud_read`, `cloud_write`, `player`, `progress`, `scores`, `set_presence`, `sign_in`, `signed_in`, `submit_score`, `unlock`
 
+## `project`
+
+**Functions:** `copy_example`, `create`, `examples`, `forget`, `home`, `in_tab`, `open`, `pick_folder`, `recent`, `templates`, `version`
+
+## `release`
+
+**Functions:** `channels`, `install`, `installed`, `releases`
+
 ## `render`
 
 **Functions:** `built_mesh`, `camera_2d`, `camera_matrix`, `camera_pose`, `cell`, `channel`, `channels`, `check_material`, `clones`, `draw_arc_2d`, `draw_box`, `draw_capsule`, `draw_circle_2d`, `draw_line`, `draw_line_2d`, `draw_lines`, `draw_polygon_2d`, `draw_polyline_2d`, `draw_rect_2d`, `draw_sphere`, `draw_text`, `draw_text_2d`, `draw_texture_2d`, `material_params`, `mouse_ray`, `mouse_world_2d`, `outline`, `pick_ray`, `refresh_rate`, `safe_area`, `screenshot`, `set_app_icon`, `set_background`, `set_ball`, `set_camera`, `set_camera_2d`, `set_camera_input`, `set_cell`, `set_channel`, `set_cuboid`, `set_cursor_grab`, `set_cursor_hidden`, `set_fullscreen`, `set_grid`, `set_grid_colors`, `set_keep_awake`, `set_rect`, `set_shader_preview`, `set_shader_probe`, `set_terrain`, `set_window_mode`, `shader_probe`, `stats`, `terrain`, `text_size`, `texture_size`, `tile_data`, `trace_texture`
 
-**Constants** (30):
+**Constants** (31):
 
 | Name | Value |
 | --- | --- |
-| `CAMERA_2D` | `2d` |
-| `CAMERA_3D` | `3d` |
+| `ALPHA_BLEND` | `blend` |
+| `ALPHA_MASK` | `mask` |
+| `ALPHA_OPAQUE` | `opaque` |
 | `FOG_EXPONENTIAL` | `exponential` |
 | `FOG_EXPONENTIAL_SQUARED` | `exponential_squared` |
 | `FOG_LINEAR` | `linear` |
@@ -290,9 +301,8 @@ cannot drift from what scripts actually see.
 | `SHAPE_PYRAMID` | `pyramid` |
 | `SHAPE_RECT` | `rect` |
 | `SHAPE_STAR` | `star` |
-| `SHAPE_TORUS` | `torus` |
 
-…and 6 more.
+…and 7 more.
 
 ## `replay`
 
@@ -349,7 +359,7 @@ cannot drift from what scripts actually see.
 
 ## `ui`
 
-**Functions:** `activate_focused`, `add_space`, `available_height`, `available_width`, `bottom_panel`, `central_panel`, `central_rect`, `circle_button`, `click`, `clipboard`, `code_editor`, `code_line`, `color`, `cursor_y`, `dot`, `drag_value`, `dropdown`, `focus_next`, `focus_previous`, `focused`, `frame`, `height_class`, `horizontal`, `image`, `image_button`, `label`, `left_panel`, `list`, `menu_item`, `modal`, `overlay`, `pill`, `rect_stroke`, `request_repaint`, `right`, `right_panel`, `scale`, `screen_size`, `scroll`, `separator`, `set_clipboard`, `set_focus`, `set_keyboard_focus`, `set_lazy`, `set_scale`, `set_text`, `set_theme`, `set_widget_layer`, `set_widget_surface`, `shortcut`, `slider`, `spacing`, `text_field`, `toggle`, `top_panel`, `vertical`, `wants_keyboard`, `wants_pointer`, `widget_rect`, `width_class`, `window`
+**Functions:** `activate_focused`, `add_space`, `available_height`, `available_width`, `bar`, `bottom_panel`, `central_panel`, `central_rect`, `circle_button`, `click`, `clipboard`, `code_editor`, `code_line`, `color`, `cursor_y`, `dot`, `drag_value`, `dropdown`, `focus_next`, `focus_previous`, `focused`, `frame`, `height_class`, `horizontal`, `image`, `image_button`, `label`, `left_panel`, `list`, `loaded`, `menu_item`, `modal`, `overlay`, `pill`, `rect_stroke`, `request_repaint`, `right`, `right_panel`, `scale`, `screen_size`, `scroll`, `separator`, `set_clipboard`, `set_focus`, `set_keyboard_focus`, `set_lazy`, `set_loading`, `set_scale`, `set_text`, `set_theme`, `set_widget_layer`, `set_widget_surface`, `shortcut`, `slider`, `spacing`, `text_field`, `toggle`, `top_panel`, `vertical`, `wants_keyboard`, `wants_pointer`, `widget_rect`, `width_class`, `window`
 
 **Constants** (65):
 

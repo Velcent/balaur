@@ -172,15 +172,19 @@ impl<E: Clone + Serialize + DeserializeOwned> ExternalIo<E> {
 /// Where the engine's counters stood when a session started.
 ///
 /// A recording made in a long-lived process — the editor, which plays a game
-/// many times without restarting — starts at whatever tick, time and token
-/// the editor had reached. Replay puts all three back, so a script sees the
-/// numbers it saw, and an http reply keyed by its request id finds the
-/// request that recorded it.
+/// many times without restarting — starts at whatever tick, time, token and
+/// node id the editor had reached. Replay puts them all back, so a script sees
+/// the numbers it saw, an http reply keyed by its request id finds the request
+/// that recorded it, and a node spawned at run time gets the id it had.
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
 pub struct Origin {
     pub tick: u64,
     pub time: f64,
     pub tokens: u64,
+    /// Zero in a file recorded before ids were kept, which is where a fresh
+    /// process starts them anyway.
+    #[serde(default)]
+    pub ids: u64,
 }
 
 impl Origin {
@@ -189,20 +193,22 @@ impl Origin {
     /// The tick and time here are provisional: whether the frame this was
     /// read in is itself recorded depends on where in the frame the recording
     /// started, so [`Recorder`] settles both against the first frame it
-    /// actually writes. The token counter is not provisional — it has to be
-    /// the value in force when recording began, because a request made
-    /// between then and the first frame is part of that frame.
+    /// actually writes. The token and id counters are not provisional — each
+    /// has to be the value in force when recording began, because a request
+    /// or a spawn made between then and the first frame is part of that frame.
     pub fn of(eng: &Engine) -> Self {
         Self {
             tick: eng.tick(),
             time: eng.time(),
             tokens: eng.tokens(),
+            ids: crate::ids::next(eng),
         }
     }
 
     pub fn restore(&self, eng: &Engine) {
         eng.set_clock(self.tick, self.time);
         eng.set_tokens(self.tokens);
+        crate::ids::set_next(eng, self.ids);
     }
 }
 
@@ -271,6 +277,10 @@ pub struct Header {
     /// When the session started, for naming and listing it.
     #[serde(default)]
     pub started: String,
+    /// The rate the session ticked at. Zero in a file written before the
+    /// rate was a setting, which is the same thing as the default.
+    #[serde(default)]
+    pub tick_hz: u32,
     /// Loaded state a plugin declared through `App::add_replay_setup`, keyed
     /// by its name. Restored before the first tick, so what a recording
     /// derives is what it derived when it was made.
@@ -599,6 +609,7 @@ pub fn start_recording(
         origin: Origin::of(eng),
         scripts: scripts.to_string(),
         started: timestamp(),
+        tick_hz: crate::tick_hz(),
         setup: capture_setup(eng),
     };
     let recorder = Recorder::create(
@@ -911,6 +922,11 @@ impl ReplayPlayer {
 /// the game's scripts attach: an `init` that opens a socket must be
 /// suppressed, and one that takes a token must take the recorded one.
 pub fn begin(eng: &Engine, session: Session) {
+    // The step every recorded frame was taken at. A file from before the rate
+    // was a setting says zero, which is the default it was made at.
+    if session.header.tick_hz > 0 {
+        crate::set_tick_hz(session.header.tick_hz);
+    }
     session.header.origin.restore(eng);
     restore_setup(eng, &session.header.setup);
     let seed = session.header.seed;

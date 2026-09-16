@@ -205,6 +205,30 @@ pub const NODE_OPS: &[NodeOp] = &[
         call: global_z_index,
     },
     NodeOp {
+        name: crate::process::KEY,
+        call: process,
+    },
+    NodeOp {
+        name: "set_process",
+        call: set_process,
+    },
+    NodeOp {
+        name: "ticking",
+        call: ticking,
+    },
+    NodeOp {
+        name: crate::interpolate::KEY,
+        call: interpolate,
+    },
+    NodeOp {
+        name: "set_interpolate",
+        call: set_interpolate,
+    },
+    NodeOp {
+        name: "reset_interpolation",
+        call: reset_interpolation,
+    },
+    NodeOp {
         name: "tags",
         call: tags,
     },
@@ -254,7 +278,7 @@ pub fn install_node_api(m: &mut dyn Bindings<Engine>) {
         ("get_component", &[], "(component: string)", "The named component's properties as a table, nil when the node does not carry it."),
         ("has_component", &[], "(component: string)", "Whether the node carries the named component."),
         ("component_names", &[], "()", "The names of every component on the node."),
-        ("stable_id", &[], "()", "The node's stable id, what a scene file declared or what `ids::mint` gave a spawned node, empty when it carries none. Survives rename and reparent, which a path does not."),
+        ("stable_id", &[], "()", "The node's stable id: what a scene file declared, or what it was given when it was spawned. Survives rename and reparent, which a path does not."),
         ("descendants", &[], "()", "Every node under this one, in tree order, the node itself excluded."),
         ("script_path", &[], "()", "The path of the script attached to the node, nil when it has none."),
         ("has_method", &[], "(method: string)", "Whether the node's script declares this method, so a caller can tell \"no handler\" from \"a handler that answered nothing\"."),
@@ -276,6 +300,12 @@ pub fn install_node_api(m: &mut dyn Bindings<Engine>) {
         ("z_index", &[], "(node)", "The node's own draw layer, added to its parent's unless set absolute."),
         ("set_z_index", &[], "(node, z: int, relative: bool)", "Put the node and its subtree on a draw layer: higher draws later. Relative by default, adding to the parent's layer; false makes it absolute."),
         ("global_z_index", &[], "(node)", "The layer the node actually draws on, with every ancestor's added in."),
+        (crate::process::KEY, &[], "(node)", "When this node ticks: \"inherit\", \"pausable\", \"when_paused\", \"always\" or \"disabled\". \"inherit\" is the default and takes the nearest ancestor's answer."),
+        ("set_process", &[], "(node, mode: string)", "Set when the node and its subtree tick. \"always\" runs through a pause, which is what a pause menu is; \"when_paused\" runs only while paused; \"disabled\" never runs; \"inherit\" goes back to the parent's. Physics is one world and is held whole by a pause whatever this says."),
+        ("ticking", &[], "(node)", "Whether the node ticks this frame, its process mode and the game's pause together."),
+        (crate::interpolate::KEY, &[], "(node)", "Whether the node is drawn between fixed steps."),
+        ("set_interpolate", &[], "(node, on: bool)", "Draw the node between fixed steps, or stop. Needs `[time] interpolate` on; a body and a script with `fixed_update` ask for it on their own."),
+        ("reset_interpolation", &[], "(node)", "Throw away the poses the node was blending and start again from where it is, so a teleport does not streak across the level. `physics3d.teleport` and `physics2d.teleport` call it for you."),
         ("tags", &[], "(node)", "The names the node is filed under, sorted."),
         ("has_tag", &[], "(node, tag: string)", "Whether the node is filed under a name."),
         ("add_tag", &[], "(node, tag: string)", "File the node under a name; `scene.tagged` finds it from then on."),
@@ -367,6 +397,44 @@ fn global_visible(eng: &Engine, args: &[Value]) -> Result<Value> {
     let e = node(args)?;
     let world = eng.world();
     Ok(Value::Bool(scene::composed_appearance(&world, e).visible))
+}
+
+fn process(eng: &Engine, args: &[Value]) -> Result<Value> {
+    let e = node(args)?;
+    let mode = crate::process::own(&eng.world(), e);
+    Ok(Value::Str(mode.name().to_string()))
+}
+
+fn set_process(eng: &Engine, args: &[Value]) -> Result<Value> {
+    let named = text(args, 1)?;
+    let mode = crate::process::ProcessMode::parse(named)
+        .ok_or_else(|| anyhow!("'{named}' is not a process mode"))?;
+    let e = node(args)?;
+    crate::process::set(&mut eng.world_mut(), e, mode);
+    Ok(Value::Nil)
+}
+
+fn ticking(eng: &Engine, args: &[Value]) -> Result<Value> {
+    let e = node(args)?;
+    Ok(Value::Bool(crate::process::ticking(eng, e)))
+}
+
+fn interpolate(eng: &Engine, args: &[Value]) -> Result<Value> {
+    let e = node(args)?;
+    Ok(Value::Bool(crate::interpolate::is_on(eng, e)))
+}
+
+fn set_interpolate(eng: &Engine, args: &[Value]) -> Result<Value> {
+    let on = flag(args, 1)?;
+    let e = node(args)?;
+    crate::interpolate::set(eng, e, Some(on));
+    Ok(Value::Nil)
+}
+
+fn reset_interpolation(eng: &Engine, args: &[Value]) -> Result<Value> {
+    let e = node(args)?;
+    crate::interpolate::reset(eng, e);
+    Ok(Value::Nil)
 }
 
 fn tint(eng: &Engine, args: &[Value]) -> Result<Value> {
@@ -591,14 +659,9 @@ fn get_node(eng: &Engine, args: &[Value]) -> Result<Value> {
 
 fn add_child(eng: &Engine, args: &[Value]) -> Result<Value> {
     let e = node(args)?;
-    let id = crate::ids::mint(eng);
     let mut world = eng.world_mut();
     let name = text(args, 1)?.to_string();
-    let child = if id.is_empty() {
-        scene::spawn_node(&mut world, &name, e)
-    } else {
-        scene::spawn_node_with_id(&mut world, &name, e, id)
-    };
+    let child = scene::spawn_node(&mut world, &name, e);
     drop(world);
     // A game that adds a node is a game whose world changed, which is what a
     // session timeline is for. Scene loading does not come through here.

@@ -5,7 +5,7 @@
 # own, sccache hands the dependencies between them, and the default shape
 # stays in `target/` so a plain `cargo test` is never cold.
 #
-# Usage: precommit.sh [--files|--lints|--full|--e2e]
+# Usage: precommit.sh [--files|--lints|--full|--e2e] [--fix]
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
@@ -13,11 +13,15 @@ cd "$(dirname "$0")/.."
 # reaches the cargo tree under it rather than orphaning a build holding locks.
 set -m
 
-mode=${1:---full}
-case $mode in
-  --files|--lints|--full|--e2e) ;;
-  *) printf 'usage: precommit.sh [--files|--lints|--full|--e2e]\n' >&2; exit 2 ;;
-esac
+mode=--full
+fix=0
+for arg in "$@"; do
+  case $arg in
+    --files|--lints|--full|--e2e) mode=$arg ;;
+    --fix) fix=1 ;;
+    *) printf 'usage: precommit.sh [--files|--lints|--full|--e2e] [--fix]\n' >&2; exit 2 ;;
+  esac
+done
 
 logs=target/precommit
 mkdir -p "$logs"
@@ -153,6 +157,9 @@ shapes_stream() {
   local bad=0
   step 'dylib plugin tests' shape exttest test -p balaur_plugin --features dylib || bad=1
   step 'extension tests' shape exttest test -p balaur --features extensions || bad=1
+  # `balaur import file.aseprite` is behind a feature, so its tests are not in
+  # the default run: without this the whole module compiles for nobody.
+  step 'aseprite tests' shape exttest test -p balaur_render --features aseprite || bad=1
   step 'no-default build' shape nodefault build -p balaur_cli --no-default-features || bad=1
   step 'no-default tests' shape nodefault test -p balaur_core -p balaur_physics --no-default-features || bad=1
   return $bad
@@ -176,6 +183,13 @@ wasm_stream() {
     --no-default-features --features audio,http,websocket,gamend,web,window \
     -- -D warnings
 }
+
+# Opt in, and before any stream starts: every stream reads what this rewrites,
+# and it rewrites the whole checkout, other work in progress included.
+if [ $fix -eq 1 ]; then
+  say "cargo fmt --all"
+  cargo fmt --all || exit 1
+fi
 
 if [ "$mode" = "--files" ]; then
   start files files_stream

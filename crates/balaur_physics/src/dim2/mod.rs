@@ -36,7 +36,7 @@ use query::overlaps_value;
 use balaur_core::digest::{Entry, Hasher, node_label};
 
 use crate::vocabulary::{component as c, hook};
-use balaur_core::FIXED_DT;
+use balaur_core::fixed_dt;
 
 pub struct PhysicsState2d {
     pub world: PhysicsWorld2,
@@ -60,7 +60,7 @@ pub struct PhysicsState2d {
     /// in 3D, so `is_grounded` reads rather than moves.
     pub grounded: DetHashMap<Entity, bool>,
     pub paused: bool,
-    /// Mirrors `PhysicsState::sleeping_allowed`; `physics.set_sleeping_allowed`
+    /// Mirrors `PhysicsState3d::sleeping_allowed`; `physics.set_sleeping_allowed`
     /// writes both worlds.
     pub sleeping_allowed: bool,
     /// Bumped by every shape edit a script makes, as in 3D, so a dug voxel
@@ -115,6 +115,11 @@ crate::shared::world::functions!(
 );
 
 fn step_system(eng: &Engine, _dt: f32) {
+    // One world, so a paused game holds every body — an `always` subtree
+    // included, as `crate::step_system` holds the 3D one.
+    if eng.paused() {
+        return;
+    }
     // A map whose cells moved rebuilds once, before the step that has to
     // collide with them.
     tiles::sync_tile_colliders(eng);
@@ -149,9 +154,10 @@ fn step_system(eng: &Engine, _dt: f32) {
             }
         }
 
-        // Exactly one step: Stage::FixedUpdate already repeats at FIXED_DT, and a
-        // second accumulator here would drift out of step with the scripts.
-        state.world.integration_parameters.dt = scalar::real(FIXED_DT);
+        // Exactly one step: Stage::FixedUpdate already repeats at the fixed
+        // step, and a second accumulator here would drift out of step with
+        // the scripts.
+        state.world.integration_parameters.dt = scalar::real(fixed_dt());
         // The step rebuilds the broad phase itself, as in 3D; without this a
         // query after a collider was added rebuilds it a second time.
         state.queries_ready = true;
@@ -174,7 +180,7 @@ fn step_system(eng: &Engine, _dt: f32) {
                 t.rotation = Quat::from_rotation_z(scalar::f32_of(body.rotation().angle()));
             }
         }
-        (collector.take(), joint::broken(state))
+        (collector.take(), joint::broken(state, &world))
     };
     events::deliver(eng, &events.0);
     for entity in &events.1 {

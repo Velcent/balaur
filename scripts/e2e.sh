@@ -47,7 +47,9 @@ check_run() { # check_run <label> <rc> <output>
     fail "$label exited $rc"
   fi
   if grep -q 'ERROR' <<<"$out"; then
-    grep 'ERROR' <<<"$out" | head -5
+    # The lines after too: a script error's message and location follow the
+    # ERROR line on lines of their own, and the first line alone says nothing.
+    grep -A 12 'ERROR' <<<"$out" | head -40
     fail "$label logged errors"
   fi
 }
@@ -67,6 +69,9 @@ step() { # step <label> <balaur args...>
 # document node must resolve to a node in the engine mirror.
 UNRESOLVED='did not resolve in the mirror'
 
+# What a state that ran leaves in the log. See the check at the end of edit_step.
+RAN='selftest ok|\[script\] .*skip|\[script\] showcase '
+
 edit_step() { # edit_step <label> <project> [state]
   local label=$1 project=$2 state=${3:-} out rc
   set +e
@@ -82,6 +87,24 @@ edit_step() { # edit_step <label> <project> [state]
     grep -E "no mirror node|$UNRESOLVED" <<<"$out" | head -5
     fail "$label: the editor could not resolve every node of the scene"
   fi
+  # A state that logs nothing ran nothing, and logged no error either: a check
+  # passing, a skip saying why, or a showcase saying what it plays.
+  if [ -n "$state" ] && ! grep -qE "$RAN" <<<"$out"; then
+    printf '%s\n' "$out" | tail -10
+    fail "$label: the state ran nothing, so it asserted nothing"
+  fi
+}
+
+# A demo that writes into the project it edits runs on a copy. The import drops
+# files into the example, and a run that ends before the teardown -- a slow
+# machine, an interrupt -- would leave them in the tree.
+edit_copy() { # edit_copy <label> <project> <state>
+  local copy="$out_dir/edited/$(basename "${2%/}")"
+  rm -rf "$copy"
+  mkdir -p "$(dirname "$copy")"
+  cp -R "${2%/}" "$copy"
+  edit_step "$1" "$copy" "$3"
+  rm -rf "$copy"
 }
 
 # The editor is a Balaur project, and so are the library it copies from and
@@ -155,6 +178,22 @@ for ex in examples/*/; do
   edit_step "$name: layout" "$ex" layoutdemo
   printf 'ok\n'
 
+  # The node picker: what it groups a type under, and that a pick builds one.
+  printf '  picker ... '
+  edit_step "$name: picker" "$ex" pickerdemo
+  printf 'ok\n'
+
+  # Renaming, which nothing in the shell could do before.
+  printf '  rename ... '
+  edit_step "$name: rename" "$ex" renamedemo
+  printf 'ok\n'
+
+  # Import: a dropped model's files, the scene it writes, and that the mesh
+  # inside that scene names a file in this project rather than the editor's.
+  printf '  import ... '
+  edit_copy "$name: import" "$ex" jobdemo
+  printf 'ok\n'
+
   # Focus: the shell folds round the code and comes back to what it was.
   printf '  focus ...  '
   edit_step "$name: focus" "$ex" focusdemo
@@ -183,6 +222,7 @@ for ex in examples/*/; do
   # editor; ninety frames of it is enough to fail on a broken call.
   printf '  show ...   '
   edit_step "$name: showcase" "$ex" "show:input,input"
+  printf 'ok\n'
 
   # The editor plugin seam, from editor/plugins/counter.rn: a dock tab, a
   # window, a palette command, an inspector section and this state itself.
@@ -258,6 +298,7 @@ for ex in examples/*/; do
   # The library: a material copied in and pointed at the selection.
   printf '  library ...'
   edit_step "$name: library" "$ex" librarydemo
+  edit_step "$name: rows" "$ex" rowsdemo
   printf 'ok\n'
 
   # The Pen: anchors, a handle, the loop closed, and the asset it writes.

@@ -13,6 +13,7 @@ pub(crate) mod controls;
 pub(crate) mod exports;
 pub(crate) mod files;
 pub(crate) mod gdscript;
+pub(crate) mod io;
 pub(crate) mod machine;
 pub(crate) mod material;
 pub(crate) mod nodes;
@@ -26,6 +27,7 @@ pub(crate) mod strings;
 pub(crate) mod textures;
 pub(crate) mod theme;
 pub(crate) mod tiles;
+pub(crate) mod walk;
 
 use std::collections::BTreeMap;
 

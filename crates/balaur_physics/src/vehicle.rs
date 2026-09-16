@@ -19,8 +19,9 @@ use balaur_core::{Engine, Stage, entity_of};
 use balaur_plugin::Registry;
 use balaur_script::{Bindings, BindingsExt, NodeId, Value};
 
+use crate::PhysicsState3d;
 use crate::vocabulary::{self as v, component as c, keys as k, map};
-use crate::{FIXED_DT, PhysicsState};
+use balaur_core::fixed_dt;
 
 /// The chassis settings, held on the node like a character's.
 pub struct Vehicle3d(pub toml::Value);
@@ -41,6 +42,11 @@ pub(crate) fn build(reg: &mut Registry<'_>) {
 /// `Vec<Wheel>` and a handle — cheap enough that the alternative would be
 /// caching for its own sake.
 fn drive_system(eng: &Engine, _dt: f32) {
+    // Held with the step it feeds: forces applied into a world that is not
+    // stepping would all land on the frame the pause lifts.
+    if eng.paused() {
+        return;
+    }
     let vehicles: Vec<Entity> = {
         let world = eng.world();
         let mut query = world.query::<(Entity, &Vehicle3d)>();
@@ -79,7 +85,7 @@ fn drive_one(eng: &Engine, chassis: Entity) -> Result<()> {
     if wheels.is_empty() {
         return Ok(());
     }
-    let state = eng.resource::<PhysicsState>();
+    let state = eng.resource::<PhysicsState3d>();
     let mut state = state.borrow_mut();
     let state = &mut *state;
     let handle = *state
@@ -126,7 +132,7 @@ fn drive_one(eng: &Engine, chassis: Entity) -> Result<()> {
         &mut state.world.colliders,
         QueryFilter::default().exclude_rigid_body(handle),
     );
-    controller.update_vehicle(scalar::real(FIXED_DT), queries);
+    controller.update_vehicle(scalar::real(fixed_dt()), queries);
     // Keep what the step worked out, so the wheel's rotation and its ground
     // contact are readable and survive into the next rebuild.
     for ((entity, _, _), wheel) in wheels.iter().zip(controller.wheels()) {
@@ -143,7 +149,7 @@ fn drive_one(eng: &Engine, chassis: Entity) -> Result<()> {
 /// Kept beside the world rather than in it: rapier's controller is rebuilt
 /// every step, and these are the four numbers that must not be.
 #[derive(Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
-pub struct WheelInput {
+pub struct WheelInput3d {
     pub engine_force: Real,
     pub brake: Real,
     pub steering: Real,
@@ -179,7 +185,7 @@ pub(crate) fn install_vehicle_api(m: &mut dyn Bindings<Engine>) {
     );
     m.function("wheel_state", |eng: &Engine, node: NodeId| {
         let entity = entity_of(node)?;
-        let state = eng.resource::<PhysicsState>();
+        let state = eng.resource::<PhysicsState3d>();
         let state = state.borrow();
         let input = state.wheel_inputs.get(&entity).copied().unwrap_or_default();
         Ok(map([
@@ -205,7 +211,7 @@ pub(crate) fn install_vehicle_api(m: &mut dyn Bindings<Engine>) {
                 .map_err(|_| anyhow!("node has no vehicle3d"))?;
             forward_axis(&vehicle.0)
         };
-        let state = eng.resource::<PhysicsState>();
+        let state = eng.resource::<PhysicsState3d>();
         let state = state.borrow();
         let handle = *state
             .bodies
@@ -230,9 +236,9 @@ fn forward_axis(params: &toml::Value) -> Vector {
     }
 }
 
-fn with_wheel(eng: &Engine, node: NodeId, f: impl FnOnce(&mut WheelInput)) -> Result<()> {
+fn with_wheel(eng: &Engine, node: NodeId, f: impl FnOnce(&mut WheelInput3d)) -> Result<()> {
     let entity = entity_of(node)?;
-    let state = eng.resource::<PhysicsState>();
+    let state = eng.resource::<PhysicsState3d>();
     let mut state = state.borrow_mut();
     f(state.wheel_inputs.entry(entity).or_default());
     Ok(())
@@ -295,7 +301,7 @@ pub(crate) fn register_vehicle_components(reg: &mut Registry<'_>) {
             }),
             remove: Box::new(|eng, entity| {
                 let _ = eng.world_mut().remove_one::<Wheel3d>(entity);
-                let state = eng.resource::<PhysicsState>();
+                let state = eng.resource::<PhysicsState3d>();
                 state.borrow_mut().wheel_inputs.swap_remove(&entity);
                 Ok(())
             }),

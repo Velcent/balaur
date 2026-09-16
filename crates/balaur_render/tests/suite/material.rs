@@ -5,7 +5,7 @@
 //! output — runs wherever CI does. What a GPU would add is the pipeline.
 
 use balaur_core::{App, AppConfig, components, scene};
-use balaur_render::material::{Material, compile};
+use balaur_render::material::{Material3d, compile};
 use balaur_render::{RenderPlugin, Renderable2d};
 
 const SHADER: &str = r"
@@ -111,7 +111,7 @@ fn the_material_asset_loads_and_its_shader_links() {
     let dir = project();
     let app = app(dir.path());
     let asset =
-        balaur_core::assets::load_typed::<Material>(&app.engine, "materials/wave.toml").unwrap();
+        balaur_core::assets::load_typed::<Material3d>(&app.engine, "materials/wave.toml").unwrap();
     assert_eq!(asset.shader, "shaders/wave.wesl");
 
     let source = balaur_core::project::scene_text(&app.engine, &asset.shader).unwrap();
@@ -137,7 +137,7 @@ fn a_material_naming_a_missing_shader_says_which_file() {
     .unwrap();
     let app = app(dir.path());
     let asset =
-        balaur_core::assets::load_typed::<Material>(&app.engine, "materials/gone.toml").unwrap();
+        balaur_core::assets::load_typed::<Material3d>(&app.engine, "materials/gone.toml").unwrap();
     let err = balaur_core::project::scene_text(&app.engine, &asset.shader).unwrap_err();
     assert!(format!("{err:#}").contains("shaders/gone.wesl"), "{err:#}");
 }
@@ -175,8 +175,8 @@ fn a_shape3d_remembers_the_material_it_names() {
 
     let world = app.engine.world();
     let renderable = world
-        .get::<&balaur_render::Renderable>(entity)
-        .expect("a shape3d writes a Renderable");
+        .get::<&balaur_render::Renderable3d>(entity)
+        .expect("a shape3d writes a Renderable3d");
     assert_eq!(renderable.material, "materials/lit.toml");
 }
 
@@ -200,7 +200,7 @@ fn a_3d_material_links_against_the_mesh_contract() {
     let dir = project();
     let app = app(dir.path());
     let asset =
-        balaur_core::assets::load_typed::<Material>(&app.engine, "materials/lit.toml").unwrap();
+        balaur_core::assets::load_typed::<Material3d>(&app.engine, "materials/lit.toml").unwrap();
     let source = balaur_core::project::scene_text(&app.engine, &asset.shader).unwrap();
     let compiled = compile(&asset, &source).unwrap();
     assert!(compiled.wgsl.contains("fn fs_main"), "{}", compiled.wgsl);
@@ -219,7 +219,7 @@ fn a_3d_material_carries_the_per_copy_inputs_it_never_asked_for() {
     let dir = project();
     let app = app(dir.path());
     let asset =
-        balaur_core::assets::load_typed::<Material>(&app.engine, "materials/lit.toml").unwrap();
+        balaur_core::assets::load_typed::<Material3d>(&app.engine, "materials/lit.toml").unwrap();
     let source = balaur_core::project::scene_text(&app.engine, &asset.shader).unwrap();
     let compiled = compile(&asset, &source).unwrap();
     for location in 3..=7 {
@@ -267,7 +267,8 @@ struct Stripe { color: vec4<f32> }
     .unwrap();
     let app = app(dir.path());
     let asset =
-        balaur_core::assets::load_typed::<Material>(&app.engine, "materials/striped.toml").unwrap();
+        balaur_core::assets::load_typed::<Material3d>(&app.engine, "materials/striped.toml")
+            .unwrap();
     let source = balaur_core::project::scene_text(&app.engine, &asset.shader).unwrap();
     let compiled = compile(&asset, &source).expect("a shader that reads its copy links");
     assert!(compiled.wgsl.contains("fn vs_main"), "{}", compiled.wgsl);
@@ -300,7 +301,8 @@ import package::mesh::{VertexInput, VertexOutput, vertex, vertex_color, shade};
     .unwrap();
     let app = app(dir.path());
     let asset =
-        balaur_core::assets::load_typed::<Material>(&app.engine, "materials/painted.toml").unwrap();
+        balaur_core::assets::load_typed::<Material3d>(&app.engine, "materials/painted.toml")
+            .unwrap();
     assert!(
         asset.reads_vertex_color(),
         "the feature is read off the asset"
@@ -316,7 +318,7 @@ import package::mesh::{VertexInput, VertexOutput, vertex, vertex_color, shade};
 
     // The lit material never mentions it, so its pipeline has no such slot.
     let plain =
-        balaur_core::assets::load_typed::<Material>(&app.engine, "materials/lit.toml").unwrap();
+        balaur_core::assets::load_typed::<Material3d>(&app.engine, "materials/lit.toml").unwrap();
     let plain_source = balaur_core::project::scene_text(&app.engine, &plain.shader).unwrap();
     let plain = compile(&plain, &plain_source).unwrap();
     assert!(!plain.vertex_color);
@@ -367,8 +369,9 @@ fn the_2d_contract_covers_the_builtins_a_canvas_shader_uses() {
     .unwrap();
     let app = app(dir.path());
 
-    let asset = balaur_core::assets::load_typed::<Material>(&app.engine, "materials/builtins.toml")
-        .unwrap();
+    let asset =
+        balaur_core::assets::load_typed::<Material3d>(&app.engine, "materials/builtins.toml")
+            .unwrap();
     let source = balaur_core::project::scene_text(&app.engine, &asset.shader).unwrap();
     let compiled = compile(&asset, &source).unwrap();
 
@@ -527,7 +530,7 @@ fn a_material_named_by_absolute_path_belongs_to_its_own_project() {
     balaur_core::assets::save(&app.engine, &reference, &definition).unwrap();
     let written = std::fs::read_to_string(game.path().join("materials/wave.toml")).unwrap();
     assert!(written.contains("speed = 9.0"), "{written}");
-    let reread = balaur_core::assets::load_typed::<Material>(&app.engine, &reference).unwrap();
+    let reread = balaur_core::assets::load_typed::<Material3d>(&app.engine, &reference).unwrap();
     let speed = reread.params.iter().find(|(name, _)| name == "speed");
     assert_eq!(
         speed.map(|(_, value)| value.clone()),
@@ -561,4 +564,69 @@ import package::sprite::{VertexInput, VertexOutput, vertex, sample_albedo, textu
 ";
     let compiled = balaur_render::material::compile(&material, shader).expect("a slot links");
     assert!(compiled.wgsl.contains("texture_2"), "{}", compiled.wgsl);
+}
+
+/// Every material the editor's library ships compiles against the shader it
+/// names, with the features it sets.
+///
+/// A library entry is copied into a project whole, so a param the shader does
+/// not read or a feature it does not declare would land in a user's project
+/// as a material that will not link. This is where that is caught.
+#[test]
+fn every_library_material_links_against_the_shader_it_names() {
+    let library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../editor/library");
+    let mut seen = 0;
+    for entry in std::fs::read_dir(library.join("materials")).expect("the library ships materials")
+    {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+            continue;
+        }
+        let value: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let material = balaur_render::material::parse(&value)
+            .unwrap_or_else(|why| panic!("{}: {why:#}", path.display()));
+        let shader = std::fs::read_to_string(library.join(&material.shader))
+            .unwrap_or_else(|why| panic!("{}: {} {why}", path.display(), material.shader));
+        compile(&material, &shader).unwrap_or_else(|why| panic!("{}: {why:#}", path.display()));
+        seen += 1;
+    }
+    assert!(seen >= 4, "the library ships materials to check: {seen}");
+}
+
+/// The layer stack links with no layers at all, with each layer on its own,
+/// and with every one at once — which is the combination most likely to
+/// collide over a helper's name.
+#[test]
+fn the_layer_stack_links_layer_by_layer_and_all_at_once() {
+    use balaur_render::shaders::{link, wgsl};
+    let names = [
+        "image", "gradient", "noise", "matcap", "fresnel", "toon", "outline",
+    ];
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../editor/library/shaders/layers.wesl"),
+    )
+    .expect("the library ships the layer stack");
+    let link_with = |on: &dyn Fn(&str) -> bool| {
+        let features: Vec<(&str, bool)> = names.iter().map(|name| (*name, on(name))).collect();
+        link(
+            &[("package::layers", &source)],
+            "package::layers",
+            &features,
+        )
+        .map(|l| wgsl(&l))
+    };
+    let bare = link_with(&|_| false).expect("a stack with no layers must link");
+    assert!(bare.contains("fn fs_main"), "{bare}");
+    assert!(
+        !bare.contains("noise_hash"),
+        "an absent layer links to nothing"
+    );
+    for name in names {
+        link_with(&|other| other == name)
+            .unwrap_or_else(|why| panic!("the '{name}' layer must link: {why:#}"));
+    }
+    let every = link_with(&|_| true).expect("every layer at once must link");
+    assert!(every.contains("noise_hash"), "{every}");
+    assert!(every.len() > bare.len(), "layers add code, not nothing");
 }

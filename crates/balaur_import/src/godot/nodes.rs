@@ -65,7 +65,7 @@ impl Resources<'_> {
     /// An image's pixel size, read from a PNG's header. Other formats answer
     /// `None`, and a caller that needs a size reports it.
     pub(crate) fn image_size(&self, path: &str) -> Option<(u32, u32)> {
-        let bytes = std::fs::read(self.root.join(path)).ok()?;
+        let bytes = crate::godot::io::bytes(&self.root.join(path)).ok()?;
         let header = bytes.get(..24)?;
         if &header[..8] != b"\x89PNG\r\n\x1a\n" {
             return None;
@@ -122,7 +122,7 @@ pub(crate) fn load<'a>(
     value: &Value,
 ) -> Option<(crate::godot::Document, Resources<'a>)> {
     let path = res.path(value)?;
-    let text = std::fs::read_to_string(res.root.join(path)).ok()?;
+    let text = crate::godot::io::text(&res.root.join(path)).ok()?;
     let document = crate::godot::parse(&text).ok()?;
     let nested = resources_of(&document, res.root, res.project);
     Some((document, nested))
@@ -634,7 +634,6 @@ fn bone(section: &Section, out: &mut Mapped) {
 }
 
 fn camera(section: &Section, out: &mut Mapped) {
-    out.set("camera", "kind", Toml::String("2d".into()));
     // Godot's zoom is a multiplier on its pixels; here it is pixels a unit,
     // so the same view is that multiplier times what a unit is worth. Always
     // written: leaving it out would take the engine's own default instead.
@@ -642,9 +641,9 @@ fn camera(section: &Section, out: &mut Mapped) {
         .field("zoom")
         .and_then(pair)
         .map_or(1.0, |[zoom, _]| zoom);
-    out.set("camera", "zoom", Toml::Float(zoom * PIXELS_PER_UNIT));
+    out.set("camera2d", "zoom", Toml::Float(zoom * PIXELS_PER_UNIT));
     if section.field("enabled") == Some(&Value::Bool(false)) {
-        out.set("camera", "current", Toml::Boolean(false));
+        out.set("camera2d", "current", Toml::Boolean(false));
     }
 }
 

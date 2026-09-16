@@ -21,8 +21,9 @@ use balaur_core::{Engine, Transform, entity_of};
 use balaur_plugin::Registry;
 use balaur_script::{Bindings, BindingsExt, NodeId, Value};
 
+use crate::PhysicsState3d;
 use crate::vocabulary::{self as v, component as c, keys as k, map, words as w};
-use crate::{FIXED_DT, PhysicsState};
+use balaur_core::fixed_dt;
 
 /// The schema both dimensions share. `up` is the one property whose shape
 /// differs, so each adds its own.
@@ -80,7 +81,7 @@ pub(crate) fn shared_character_schema() -> String {
 }
 
 crate::shared::character::functions!(
-    state = PhysicsState,
+    state = PhysicsState3d,
     vector = Vector,
     value = Vec3,
     array = a3
@@ -109,7 +110,7 @@ pub(crate) fn move_character(eng: &Engine, entity: Entity, translation: Vector) 
     let push = crate::vocabulary::boolean(&params, k::PUSH_BODIES, true);
 
     let (movement, collisions) = {
-        let state = eng.resource::<PhysicsState>();
+        let state = eng.resource::<PhysicsState3d>();
         let mut state = state.borrow_mut();
         let state = &mut *state;
         let handle = crate::collider::first_collider(state, entity)
@@ -121,7 +122,7 @@ pub(crate) fn move_character(eng: &Engine, entity: Entity, translation: Vector) 
         let mut collisions = Vec::new();
         let filter = QueryFilter::default().exclude_collider(handle);
         let movement = controller.move_shape(
-            scalar::real(FIXED_DT),
+            scalar::real(fixed_dt()),
             &state.world.query_pipeline_with_filter(filter),
             shape.as_ref(),
             &pose,
@@ -143,7 +144,7 @@ pub(crate) fn move_character(eng: &Engine, entity: Entity, translation: Vector) 
                 filter,
             );
             controller.solve_character_collision_impulses(
-                scalar::real(FIXED_DT),
+                scalar::real(fixed_dt()),
                 &mut queries,
                 shape.as_ref(),
                 mass,
@@ -155,7 +156,7 @@ pub(crate) fn move_character(eng: &Engine, entity: Entity, translation: Vector) 
 
     apply_movement(eng, entity, movement.translation);
     {
-        let state = eng.resource::<PhysicsState>();
+        let state = eng.resource::<PhysicsState3d>();
         state
             .borrow_mut()
             .grounded
@@ -183,7 +184,7 @@ fn apply_movement(eng: &Engine, entity: Entity, translation: Vector) {
         transform.position += scalar::position_of(translation);
         scalar::pose_of(transform.position, transform.rotation)
     };
-    let state = eng.resource::<PhysicsState>();
+    let state = eng.resource::<PhysicsState3d>();
     let mut state = state.borrow_mut();
     if let Some(handle) = state.bodies.get(&entity).copied() {
         state.world.bodies[handle].set_next_kinematic_position(pose);
@@ -216,7 +217,7 @@ pub(crate) fn install_character_api(m: &mut dyn Bindings<Engine>) {
     // ground, write the transform and push bodies, so asking would simulate.
     m.function("is_grounded", |eng: &Engine, node: NodeId| {
         let entity = entity_of(node)?;
-        let state = eng.resource::<PhysicsState>();
+        let state = eng.resource::<PhysicsState3d>();
         let grounded = state.borrow().grounded.get(&entity).copied();
         Ok(grounded.unwrap_or(false))
     });

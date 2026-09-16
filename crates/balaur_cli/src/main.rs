@@ -20,9 +20,20 @@ mod export_api;
 mod export_shared;
 mod fmt;
 mod import_api;
+// Asking a tab's reader for a file: only a page has a chooser.
+#[cfg(all(feature = "import", target_family = "wasm"))]
+mod import_web;
+mod jobs;
 mod lsp;
 mod new_project;
+// The editor's start screen. A tab compiles it too: the editor's scripts name
+// `project::*` whatever they run on, and what a tab cannot do it answers for.
+mod project_api;
 mod project_tests;
+// The start screen in a browser tab: the projects it keeps and the handshake
+// that opens one, which is a page reload rather than a second process.
+#[cfg(target_family = "wasm")]
+mod project_web;
 mod templates;
 mod update;
 mod version;
@@ -71,6 +82,10 @@ enum Command {
         /// target floor, and a long press where a hover was.
         #[arg(long)]
         touch: bool,
+        /// Save a PNG of the run, on the frame before `--frames` ends it. The
+        /// game's own screen, with nothing of the editor over it.
+        #[arg(long, value_name = "PATH", requires = "frames")]
+        shot: Option<PathBuf>,
         /// Write one `<tick> <digest>` line per frame. Two runs whose traces
         /// differ diverged at the first differing line.
         #[arg(long, value_name = "PATH")]
@@ -204,16 +219,8 @@ enum Command {
         check: bool,
     },
     /// Update this install — the binary, the bundled editor and its runtime
-    /// template — to the latest published build.
-    Update {
-        /// Release tag to update to. Defaults to the latest release, or to
-        /// the rolling nightly for a nightly build.
-        #[arg(long)]
-        tag: Option<String>,
-        /// Only report whether an update exists.
-        #[arg(long)]
-        check: bool,
-    },
+    /// template — to the newest build on this one's channel.
+    Update(UpdateOpts),
     /// Open a project in the balaur editor (the editor itself is a balaur
     /// project; see the `editor/` directory).
     Edit(EditOpts),
@@ -260,6 +267,22 @@ enum Command {
         /// the layers visible in the editor.
         #[arg(long = "layer")]
         layers: Vec<String>,
+    },
+    /// Write a smaller copy of a project's images, as the variant one target
+    /// answers to: `wall.png` gains `wall.web.png`, and an export for that
+    /// target folds it onto the name the scene already uses, recording the
+    /// size the original was drawn at so a sprite over it stays that size.
+    /// Pixel art, sampled nearest, is left alone.
+    Shrink {
+        /// The project to write into.
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        /// The target the copy is for: `web`, `mobile`, `android`, `ios`.
+        #[arg(long, default_value = "web")]
+        tag: String,
+        /// The fraction of the original to scale to.
+        #[arg(long, default_value_t = 0.5)]
+        scale: f32,
     },
 }
 
@@ -344,9 +367,48 @@ fn boot_own_pack(pack: &[u8]) -> Result<()> {
     let mut app = balaur::standard_app(AppConfig::packed(Pack::decode(pack)?))?;
     app.load_project()?;
     for _ in 0..frames {
-        app.tick(balaur::FIXED_DT);
+        app.tick(balaur::fixed_dt());
     }
     Ok(())
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "import"))]
+/// `balaur shrink`: the copies written, what was left alone and why, and the
+/// bytes it came to.
+fn shrink(project: &Path, tag: &str, scale: f32) -> Result<()> {
+    let done = balaur_import::shrink::shrink(project, tag, scale)?;
+    for (path, why) in &done.skipped {
+        tracing::info!("left {path} alone: {why}");
+    }
+    let saved = done.before.saturating_sub(done.after);
+    tracing::info!(
+        "{} images at {scale} for '{tag}': {:.1} MB -> {:.1} MB, {:.1} MB saved",
+        done.written.len(),
+        done.before as f64 / 1e6,
+        done.after as f64 / 1e6,
+        saved as f64 / 1e6,
+    );
+    Ok(())
+}
+
+/// Shrinking reads and writes images, which is the importers' half of the
+/// tree; a build without them says so rather than not offering the verb.
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "import")))]
+fn shrink(project: &Path, tag: &str, scale: f32) -> Result<()> {
+    let _ = (project, tag, scale);
+    anyhow::bail!("this build has no importers: build with the `import` feature")
+}
+
+/// `balaur import`, or the same refusal when the importers are not built in.
+#[cfg(all(not(target_arch = "wasm32"), feature = "import"))]
+fn import(file: &Path, project: &Path, layers: &[String]) -> Result<()> {
+    balaur_import::import_and_report(file, project, layers)
+}
+
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "import")))]
+fn import(file: &Path, project: &Path, layers: &[String]) -> Result<()> {
+    let _ = (file, project, layers);
+    anyhow::bail!("this build has no importers: build with the `import` feature")
 }
 
 /// Each subcommand, to the one function that runs it.
@@ -354,11 +416,16 @@ fn boot_own_pack(pack: &[u8]) -> Result<()> {
 fn dispatch(command: Command) -> Result<()> {
     match command {
         Command::Api => api_dump::dump_api(),
+        Command::Shrink {
+            project,
+            tag,
+            scale,
+        } => shrink(&project, &tag, scale),
         Command::Import {
             file,
             project,
             layers,
-        } => balaur_import::import_and_report(&file, &project, &layers),
+        } => import(&file, &project, &layers),
         Command::New { path, template } => new_project::create(&path, template.as_deref()),
         Command::Run {
             path,
@@ -368,6 +435,7 @@ fn dispatch(command: Command) -> Result<()> {
             offscreen,
             fixed_tick,
             touch,
+            shot,
             trace_digest,
             timings,
             record,
@@ -379,6 +447,7 @@ fn dispatch(command: Command) -> Result<()> {
             scene,
             display: Display::of(headless, offscreen),
             frames,
+            shot,
             fixed_tick,
             touch,
             trace_digest,
@@ -437,7 +506,7 @@ fn dispatch(command: Command) -> Result<()> {
         } => project_tests::test_project(&path, frames, filter.as_deref()),
         Command::Lsp { path } => lsp::run(&path),
         Command::Fmt { paths, check } => fmt::run(&paths, check),
-        Command::Update { tag, check } => update::run(tag.as_deref(), check),
+        Command::Update(opts) => update::run(&opts),
         Command::Play { pack, frames } => play_pack(&pack, frames),
     }
 }
@@ -452,7 +521,7 @@ fn play_pack(pack: &Path, frames: Option<u64>) -> Result<()> {
     app.load_project()?;
     if let Some(frames) = frames {
         for _ in 0..frames {
-            app.tick(balaur::FIXED_DT);
+            app.tick(balaur::fixed_dt());
         }
         return Ok(());
     }
@@ -496,6 +565,8 @@ struct RunOpts {
     scene: Option<String>,
     display: Display,
     frames: Option<u64>,
+    /// Where to write a picture of the run, taken on the frame before it ends.
+    shot: Option<PathBuf>,
     fixed_tick: bool,
     touch: bool,
     trace_digest: Option<PathBuf>,
@@ -504,6 +575,24 @@ struct RunOpts {
     debug: Option<u16>,
     debug_wait: bool,
     args: Vec<String>,
+}
+
+/// What `update` was asked for. A build follows the channel its own version
+/// names (docs/RELEASING.md); everything here is a way of saying otherwise.
+#[derive(clap::Args)]
+pub(crate) struct UpdateOpts {
+    /// Release channel to follow: alpha, beta, rc, stable or nightly.
+    #[arg(long)]
+    channel: Option<String>,
+    /// One exact release tag, rather than whatever a channel holds now.
+    #[arg(long, conflicts_with = "channel")]
+    tag: Option<String>,
+    /// Only report whether an update exists.
+    #[arg(long)]
+    check: bool,
+    /// Install the published build even when it is older than this one.
+    #[arg(long)]
+    allow_downgrade: bool,
 }
 
 /// What `edit` was asked for. One bag rather than eight arguments, and the
@@ -603,7 +692,7 @@ fn replay_session(file: &Path, verify: bool, entries_at: Option<u64>) -> Result<
     balaur::replay::play(&app.engine);
 
     while balaur::replay::is_running(&app.engine) {
-        app.advance(balaur::FIXED_DT);
+        app.advance(balaur::fixed_dt());
         if let Some(at) = entries_at
             && app.engine.tick() >= at
         {
@@ -653,6 +742,7 @@ fn run_project(opts: &RunOpts) -> Result<()> {
         scene,
         display,
         frames,
+        shot,
         fixed_tick,
         touch,
         trace_digest,
@@ -688,7 +778,7 @@ fn run_project(opts: &RunOpts) -> Result<()> {
     }
     app.load_project()?;
     if *fixed_tick {
-        app.set_fixed_dt(Some(balaur::FIXED_DT));
+        app.set_fixed_dt(Some(balaur::fixed_dt()));
     }
     if let Some(trace) = trace_digest {
         if !*fixed_tick {
@@ -711,7 +801,7 @@ fn run_project(opts: &RunOpts) -> Result<()> {
                     if engine.quit_requested() {
                         break;
                     }
-                    app.tick(balaur::FIXED_DT);
+                    app.tick(balaur::fixed_dt());
                 }
             }
             None => app.run(),
@@ -727,8 +817,14 @@ fn run_project(opts: &RunOpts) -> Result<()> {
     // works the same in every loop.
     if let Some(frames) = frames {
         let mut count = 0u64;
+        // The picture is asked for a frame before the quit, so the backend
+        // has one more frame to render and write it.
+        let shot = shot.clone();
         app.add_system(balaur::Stage::Last, move |eng, _| {
             count += 1;
+            if let Some(path) = shot.as_ref().filter(|_| count + 1 == frames) {
+                balaur::render::request_screenshot(eng, path.clone());
+            }
             if count >= frames {
                 eng.request_quit();
             }
@@ -826,11 +922,18 @@ fn edit_project(opts: &EditOpts) -> Result<()> {
         touch,
         timings,
     } = opts;
-    let game = joinable(
-        &path
-            .canonicalize()
-            .with_context(|| format!("project not found: {}", path.display()))?,
-    );
+    // A folder with no manifest is not an error: it is somebody who ran the
+    // editor without saying which project, and the start screen is the answer.
+    let opened = path.join("project.toml").is_file();
+    let game = if opened {
+        joinable(
+            &path
+                .canonicalize()
+                .with_context(|| format!("project not found: {}", path.display()))?,
+        )
+    } else {
+        PathBuf::new()
+    };
     let editor_root = editor
         .clone()
         .or_else(|| std::env::var("BALAUR_EDITOR").ok().map(PathBuf::from))
@@ -852,19 +955,31 @@ fn edit_project(opts: &EditOpts) -> Result<()> {
         .context("no editor project found; pass --editor <dir>")?;
     let mut config = AppConfig::dev(editor_root.to_string_lossy().as_ref());
     config.script_args = vec![game.to_string_lossy().into_owned()];
-    if let Some(state) = state {
-        config.script_args.push(state.clone());
+    // The start screen is a start-up state like any other, so a caller that
+    // named one of its own still gets it.
+    let opening = if opened {
+        state.clone()
+    } else {
+        Some(
+            state
+                .as_ref()
+                .map_or_else(|| "manager".to_string(), |asked| format!("manager,{asked}")),
+        )
+    };
+    if let Some(state) = opening {
+        config.script_args.push(state);
     }
     let mut app = balaur::standard_app(config)?;
-    // Registered here rather than in the engine: exporting is the CLI's
-    // library, and the editor is the only app with a button for it.
+    // Registered here rather than in the engine: these are the CLI's library,
+    // and the editor is the only app with a button for them.
     #[cfg(not(target_family = "wasm"))]
-    balaur_plugin::load(&mut app, &mut export_api::ExportPlugin::new(game.clone()))?;
-    #[cfg(not(target_family = "wasm"))]
-    balaur_plugin::load(&mut app, &mut import_api::ImportPlugin::new(game.clone()))?;
+    balaur_plugin::load_all(&mut app, &mut own_modules(&game))?;
     // The editor's project is the editor; the game it edits is another root,
-    // and every path it reads back is an absolute one inside it.
-    balaur::file_api::add_root(&app.engine, &game);
+    // and every path it reads back is an absolute one inside it. With no
+    // project there is no second root until one is opened.
+    if opened {
+        balaur::file_api::add_root(&app.engine, &game);
+    }
     // Before the project loads: the editor's scripts read the platform at
     // init, and a fact that lands after that is a frame of the wrong shell.
     if *touch {
@@ -874,7 +989,9 @@ fn edit_project(opts: &EditOpts) -> Result<()> {
     // The engine read the *editor's* `[input]`, so hand it the game's: without
     // this every action a played game asks for reads zero.
     #[cfg(not(target_arch = "wasm32"))]
-    declare_game_input(&app, &game);
+    if opened {
+        declare_game_input(&app, &game);
+    }
     if let Some(frames) = *frames {
         let mut count = 0u64;
         app.add_system(balaur::Stage::Last, move |eng, _| {
@@ -929,7 +1046,10 @@ fn export_game(args: &ExportArgs) -> Result<()> {
     let download = args.download;
     let fetch = move |wanted: &str| templates::obtain(wanted, download);
     #[cfg(not(target_family = "wasm"))]
-    let modules = own_modules(args.path.clone());
+    let modules = {
+        let project = args.path.clone();
+        move || own_modules(&project)
+    };
     #[cfg(not(target_family = "wasm"))]
     let plugins: Option<&balaur_export::ExtraModules> = Some(&modules);
     #[cfg(target_family = "wasm")]
@@ -955,18 +1075,21 @@ fn export_game(args: &ExportArgs) -> Result<()> {
     })
 }
 
-/// What this binary adds to a project it compiles: the editor's `export` and
-/// `import`, which the editor's own scripts call and the engine does not
-/// carry. A project that compiles without them is a project the editor cannot
-/// open.
+/// What this binary adds to a project it edits, compiles, checks or probes:
+/// `export`, `import` and `project`, which the editor's own scripts call and
+/// the engine does not carry.
+///
+/// One list rather than one per path. A module registered on some paths and
+/// not others is a project the editor cannot open, and the failure lands on
+/// the missing item — `bundle web` reporting "Missing item" — rather than on
+/// the path that forgot it.
 #[cfg(not(target_family = "wasm"))]
-fn own_modules(project: PathBuf) -> impl Fn() -> Vec<Box<dyn balaur_plugin::Plugin>> {
-    move || {
-        vec![
-            Box::new(export_api::ExportPlugin::new(project.clone())),
-            Box::new(import_api::ImportPlugin::new(project.clone())),
-        ]
-    }
+pub(crate) fn own_modules(project: &std::path::Path) -> Vec<Box<dyn balaur_plugin::Plugin>> {
+    vec![
+        Box::new(export_api::ExportPlugin::new(project.to_path_buf())),
+        Box::new(import_api::ImportPlugin::new(project.to_path_buf())),
+        Box::new(project_api::ProjectPlugin::new()),
+    ]
 }
 
 /// The command line, plus the arguments a double-clicked bundle cannot give
@@ -980,27 +1103,11 @@ fn argv() -> Vec<std::ffi::OsString> {
     if args.len() > 1 {
         return args;
     }
-    let Some(project) = bundle_project() else {
-        return args;
-    };
+    // No project named: `edit` with no path, which opens the start screen.
+    // A bundle never opens last time's project by itself — Finder starts it
+    // with no arguments, and the screen is where a reader says which one.
     args.push("edit".into());
-    args.push(project.into_os_string());
     args
-}
-
-/// The project a bundle opens on: one under the home directory, made from the
-/// starter on first launch. Not `~/Documents`, whose first write is a macOS
-/// permission dialog — the warning this bundle exists to avoid.
-fn bundle_project() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    if !exe.parent()?.ends_with("Contents/MacOS") {
-        return None;
-    }
-    let project = PathBuf::from(std::env::var_os("HOME")?).join("Balaur");
-    if !project.join("project.toml").is_file() {
-        new_project::create(&project, None).ok()?;
-    }
-    Some(project)
 }
 
 #[cfg(test)]

@@ -5,11 +5,16 @@ mod godot;
 mod ldtk;
 #[cfg(test)]
 mod scene_check;
+pub mod shrink;
 mod tiled_map;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use anyhow::{Context, Result};
+use balaur_core::files::{self, FileBackend};
+use balaur_core::glb::{Beside, SideReader};
+use balaur_core::task::Progress;
 
 /// What an import wrote: the project-relative paths, and the scene the editor
 /// would instantiate for a model.
@@ -18,6 +23,64 @@ pub struct Imported {
     pub files: Vec<String>,
     pub scene: Option<String>,
     pub note: String,
+}
+
+/// Where an import's files go as it makes them.
+///
+/// One at a time, rather than a list the importer fills and a caller drains:
+/// a model names its textures, and collecting those before writing any holds
+/// the whole model in memory. It is also the boundary a caller reporting
+/// progress wants, and the one a browser task has to yield at.
+pub trait Sink {
+    /// Take one file, at a path relative to the project.
+    ///
+    /// # Errors
+    /// If the file cannot be written.
+    fn put(&mut self, relative: &str, bytes: &[u8]) -> Result<()>;
+
+    /// Every path taken so far, in the order it was written.
+    fn written(&self) -> &[String];
+}
+
+/// A [`Sink`] writing into a project through the engine's file backend.
+///
+/// The backend is the thread's, so a desktop writes to disk and a browser tab
+/// writes into the memory its project already lives in, with no second path
+/// for either.
+pub struct ProjectSink {
+    root: PathBuf,
+    fs: Rc<dyn FileBackend>,
+    written: Vec<String>,
+}
+
+impl ProjectSink {
+    /// A sink writing under `root`.
+    #[must_use]
+    pub fn new(root: &Path) -> Self {
+        Self {
+            root: root.to_path_buf(),
+            fs: files::default_backend(),
+            written: Vec::new(),
+        }
+    }
+}
+
+impl Sink for ProjectSink {
+    fn put(&mut self, relative: &str, bytes: &[u8]) -> Result<()> {
+        let path = self.root.join(relative);
+        if let Some(parent) = path.parent() {
+            self.fs.mkdir(parent)?;
+        }
+        self.fs
+            .write(&path, bytes)
+            .with_context(|| format!("writing {}", path.display()))?;
+        self.written.push(relative.to_string());
+        Ok(())
+    }
+
+    fn written(&self) -> &[String] {
+        &self.written
+    }
 }
 
 /// `balaur import <file>`, printing each path it wrote.
@@ -32,28 +95,316 @@ pub fn import_and_report(file: &Path, project: &Path, layers: &[String]) -> Resu
     Ok(())
 }
 
-/// `balaur import <file>`: by extension, a model or a sprite.
-pub fn import_file(file: &Path, project: &Path, layers: &[String]) -> Result<Imported> {
-    let extension = file
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    match extension.as_str() {
-        "aseprite" | "ase" => import_sprite(file, project, layers),
-        "tmx" | "ldtk" => import_level(file, project),
-        "godot" | "tscn" | "tres" => import_from_godot(file, project),
+/// Which importer a file's name routes to.
+enum Route {
+    Sprite,
+    Model,
+    /// A `.tmx` or `.ldtk`, which names the files around it.
+    Level,
+    /// A Godot project or one scene of one, which walks the whole project.
+    Godot,
+}
+
+/// Where a name is imported by, decided before anything is read: a flag that
+/// does not belong is an error about the flag rather than about a file.
+fn route(name: &Path, layers: &[String]) -> Result<Route> {
+    let extension = extension_of(name);
+    Ok(match extension.as_str() {
+        "aseprite" | "ase" => Route::Sprite,
+        "tmx" | "ldtk" => Route::Level,
+        "godot" | "tscn" | "tres" => Route::Godot,
         _ if !layers.is_empty() => {
             anyhow::bail!("--layer picks layers of an .aseprite file; {extension} has none")
         }
-        _ => import_model(file, project),
+        _ => Route::Model,
+    })
+}
+
+/// Extensions an importer reads, as [`import_file`] routes them.
+///
+/// The list lives here and nowhere else: a second copy in the editor is how a
+/// `.tscn` came to be readable by `balaur import` and refused by a drop.
+/// `.tres` is not here -- one on its own is a resource a scene names, not a
+/// thing to import.
+const CLAIMED: &[&str] = &[
+    "glb", "gltf", "aseprite", "ase", "tmx", "ldtk", "godot", "tscn",
+];
+
+/// Whether an importer reads this name, by extension.
+#[must_use]
+pub fn claims(name: &str) -> bool {
+    CLAIMED.contains(&extension_of(Path::new(name)).as_str())
+}
+
+/// The extensions an importer reads, for a file picker's filter.
+#[must_use]
+pub fn claimed() -> &'static [&'static str] {
+    CLAIMED
+}
+
+/// Whether importing this name can be driven a slice at a time.
+///
+/// A model and a sprite can: [`plan_bytes`] reads one and answers what it will
+/// write. A level cannot, because it walks the folder it sits in as it goes,
+/// so a caller has to give it one long call. A project walks too, and is
+/// [`ProjectWalk`] instead.
+#[must_use]
+pub fn slices(name: &str) -> bool {
+    matches!(
+        route(Path::new(name), &[]),
+        Ok(Route::Sprite | Route::Model)
+    )
+}
+
+/// Whether this name is a whole Godot project, which [`ProjectWalk`] steps.
+#[must_use]
+pub fn walks(name: &str) -> bool {
+    extension_of(Path::new(name)) == "godot"
+}
+
+/// A Godot project import in flight, a file at a time.
+///
+/// The one import that has no plan: what it writes is found by walking the
+/// project, and a project holds thousands of files. So it is counted off by
+/// the files it reads rather than the ones it writes, and a caller under a
+/// tick steps it as it does a [`Plan`].
+pub struct ProjectWalk(godot::walk::Walk);
+
+impl ProjectWalk {
+    /// Convert the project's settings, and read the lookups every file after
+    /// them needs. Nothing else is read here.
+    ///
+    /// # Errors
+    /// If `project.godot` cannot be read, or says something this cannot map.
+    pub fn begin(file: &Path, project: &Path) -> Result<Self> {
+        Ok(Self(godot::walk::Walk::begin(file, project)?))
     }
+
+    /// How many files it will read, for a caller counting progress.
+    #[must_use]
+    pub fn files(&self) -> usize {
+        self.0.files()
+    }
+
+    /// The project-relative path [`ProjectWalk::read_next`] would read now, or
+    /// `None` when there are none left.
+    #[must_use]
+    pub fn peek(&self) -> Option<&str> {
+        self.0.peek()
+    }
+
+    /// Read one file, convert it, and say whether any are left.
+    ///
+    /// A scene that will not convert is a note in the report rather than an
+    /// error: one bad scene in a thousand does not stop the other files.
+    ///
+    /// # Errors
+    /// If a file cannot be read or written.
+    pub fn read_next(&mut self) -> Result<Progress> {
+        self.0.step()?;
+        Ok(if self.0.peek().is_some() {
+            Progress::More
+        } else {
+            Progress::Done
+        })
+    }
+
+    /// The shim, the report, and what the whole walk wrote.
+    ///
+    /// # Errors
+    /// If the report cannot be written.
+    pub fn finish(self) -> Result<Imported> {
+        self.0.finish()
+    }
+}
+
+/// `balaur import <file>`: by extension, a model or a sprite.
+pub fn import_file(file: &Path, project: &Path, layers: &[String]) -> Result<Imported> {
+    match route(file, layers)? {
+        // A level and a Godot project are read from where they sit: both
+        // walk a directory rather than taking one file.
+        Route::Level => import_level(file, &mut ProjectSink::new(project)),
+        Route::Godot => import_from_godot(file, project),
+        // A model or a sprite: read here, and routed again by name inside.
+        _ => {
+            let fs = files::default_backend();
+            let name = file
+                .file_name()
+                .and_then(|n| n.to_str())
+                .context("the file has no name")?;
+            let bytes = fs
+                .read(file)
+                .with_context(|| format!("reading {}", file.display()))?;
+            // Whatever a `.gltf` names beside itself is beside the file it
+            // was read from.
+            let directory = file.parent().map(Path::to_path_buf).unwrap_or_default();
+            let side = |uri: &str| -> Result<Vec<u8>> {
+                let path = directory.join(uri);
+                fs.read(&path)
+                    .with_context(|| format!("reading {}", path.display()))
+            };
+            import_bytes(name, &bytes, &mut ProjectSink::new(project), &side, layers)
+        }
+    }
+}
+
+/// One file an import is going to write, and where its bytes come from.
+enum Output {
+    /// Bytes the import made or already holds: a converted document, a
+    /// sidecar, or a texture the model carried inside itself.
+    Held { path: String, bytes: Vec<u8> },
+    /// A file the source named beside itself, read when it is written and not
+    /// before. A model's textures are this, which is why a plan of them costs
+    /// their names rather than their bytes.
+    Beside { path: String, uri: String },
+}
+
+impl Output {
+    fn path(&self) -> &str {
+        match self {
+            Self::Held { path, .. } | Self::Beside { path, .. } => path,
+        }
+    }
+}
+
+/// An import read and understood, with nothing written yet.
+///
+/// The parse is one piece of work and each file after it is another, so a
+/// caller that must not block — a browser tab, or an editor keeping its frame
+/// — drives [`Plan::write_next`] a slice at a time rather than handing the
+/// whole import one call.
+pub struct Plan {
+    outputs: Vec<Output>,
+    next: usize,
+    scene: Option<String>,
+    note: String,
+}
+
+impl Plan {
+    /// How many files it will write, for a caller counting progress.
+    #[must_use]
+    pub fn outputs(&self) -> usize {
+        self.outputs.len()
+    }
+
+    /// The scene the editor would instantiate, for a model.
+    #[must_use]
+    pub fn scene(&self) -> Option<&str> {
+        self.scene.as_deref()
+    }
+
+    /// A line for the log, for a caller that drove the writing itself and so
+    /// never got an [`Imported`] back.
+    #[must_use]
+    pub fn note(&self) -> &str {
+        &self.note
+    }
+
+    /// The path of the file [`Plan::write_next`] would write now, or `None`
+    /// when there are none left.
+    #[must_use]
+    pub fn peek(&self) -> Option<&str> {
+        self.outputs.get(self.next).map(Output::path)
+    }
+
+    /// Write one file, and say whether any are left.
+    ///
+    /// `side` answers for what the source named beside itself, as it did for
+    /// the plan. Bytes are read here rather than held, so a model's textures
+    /// cross one at a time however many it names.
+    ///
+    /// # Errors
+    /// If the file cannot be read or written.
+    pub fn write_next(&mut self, sink: &mut dyn Sink, side: SideReader<'_>) -> Result<Progress> {
+        let Some(output) = self.outputs.get(self.next) else {
+            return Ok(Progress::Done);
+        };
+        self.next += 1;
+        match output {
+            Output::Held { path, bytes } => sink.put(path, bytes)?,
+            Output::Beside { path, uri } => {
+                let bytes = side(uri).with_context(|| format!("the source names '{uri}'"))?;
+                sink.put(path, &bytes)?;
+            }
+        }
+        Ok(if self.next < self.outputs.len() {
+            Progress::More
+        } else {
+            Progress::Done
+        })
+    }
+
+    /// Write everything left, and answer as an import does.
+    ///
+    /// # Errors
+    /// If any file cannot be read or written.
+    pub fn write_all(mut self, sink: &mut dyn Sink, side: SideReader<'_>) -> Result<Imported> {
+        while self.write_next(sink, side)? == Progress::More {}
+        Ok(Imported {
+            files: sink.written().to_vec(),
+            scene: self.scene,
+            note: self.note,
+        })
+    }
+}
+
+/// Read a file and work out what importing it writes, writing nothing.
+///
+/// `name` is the file's own name, whose extension picks the importer and whose
+/// stem names what is written. `side` answers for the files a `.gltf` names
+/// beside itself; a `.glb` is self-contained and never asks.
+///
+/// # Errors
+/// If the bytes are not the format the name claims, or the name is one only
+/// [`import_file`] reads.
+pub fn plan_bytes(
+    name: &str,
+    bytes: &[u8],
+    side: SideReader<'_>,
+    layers: &[String],
+) -> Result<Plan> {
+    match route(Path::new(name), layers)? {
+        Route::Sprite => plan_sprite(name, bytes, layers),
+        Route::Model => plan_model(name, bytes, side),
+        Route::Level | Route::Godot => anyhow::bail!(
+            "{name} names the files around it, so it is imported from the folder it sits in \
+             rather than from bytes"
+        ),
+    }
+}
+
+/// `balaur import` for a caller holding the bytes and no path: a file dropped
+/// on a browser tab, which has a name and contents and no directory.
+///
+/// `name` is the file's own name, whose extension picks the importer and whose
+/// stem names what is written. `side` answers for the files a `.gltf` names
+/// beside itself; a `.glb` is self-contained and never asks.
+///
+/// # Errors
+/// If the bytes are not the format the name claims, or a file cannot be
+/// written, or the name is one only [`import_file`] reads.
+pub fn import_bytes(
+    name: &str,
+    bytes: &[u8],
+    sink: &mut dyn Sink,
+    side: SideReader<'_>,
+    layers: &[String],
+) -> Result<Imported> {
+    plan_bytes(name, bytes, side, layers)?.write_all(sink, side)
+}
+
+/// A file's extension, lowercased, or empty for one with none.
+fn extension_of(file: &Path) -> String {
+    file.extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
 }
 
 /// `balaur import level.tmx --project game`: the atlas, a `tileset` per
 /// sheet, and a scene rooted at the level, a `tilemap` node per tile layer
 /// under it.
-fn import_level(file: &Path, project: &Path) -> Result<Imported> {
+fn import_level(file: &Path, sink: &mut dyn Sink) -> Result<Imported> {
     let stem = import_stem(file)?;
     let ldtk = file
         .extension()
@@ -66,16 +417,12 @@ fn import_level(file: &Path, project: &Path) -> Result<Imported> {
     .with_context(|| format!("importing {}", file.display()))?;
     let mut out = Imported::default();
     for (rel, data) in &imported.files {
-        let path = project.join(rel);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(&path, data)?;
-        out.files.push(rel.clone());
+        sink.put(rel, data)?;
         if rel.starts_with("scenes/") {
             out.scene = Some(rel.clone());
         }
     }
+    out.files = sink.written().to_vec();
     out.note = format!(
         "imported {} as {} layer{}",
         file.display(),
@@ -95,7 +442,7 @@ fn import_from_godot(file: &Path, project: &Path) -> Result<Imported> {
         .unwrap_or_default()
         .to_ascii_lowercase();
     match extension.as_str() {
-        "godot" => crate::godot::files::import_project(file, project),
+        "godot" => crate::godot::walk::import_project(file, project),
         "tscn" => crate::godot::files::import_scene(file, project),
         _ => anyhow::bail!(
             "a .{extension} on its own is not read yet; `balaur import project.godot` converts the \
@@ -116,43 +463,57 @@ fn import_stem(file: &Path) -> Result<String> {
         .replace([' ', '-'], "_"))
 }
 
-/// `balaur import walk.aseprite --project game`: `art/walk.png`,
+/// `balaur import walk.aseprite --project game`: `art/walk.webp`,
 /// `sheets/walk.toml` and, with tags or more than one frame,
 /// `animations/walk.toml`.
-fn import_sprite(file: &Path, project: &Path, layers: &[String]) -> Result<Imported> {
-    let bytes = std::fs::read(file).with_context(|| format!("reading {}", file.display()))?;
-    let stem = import_stem(file)?;
-    let texture = format!("art/{stem}.png");
-    let imported = balaur_render::aseprite::import(&bytes, &stem, &texture, layers)
-        .with_context(|| format!("importing {}", file.display()))?;
-    let mut written = vec![
-        (texture, imported.png),
-        (format!("sheets/{stem}.toml"), imported.sheet.into_bytes()),
+fn plan_sprite(name: &str, bytes: &[u8], layers: &[String]) -> Result<Plan> {
+    let stem = import_stem(Path::new(name))?;
+    let texture = format!("art/{stem}.webp");
+    let imported = balaur_render::aseprite::import(bytes, &stem, &texture, layers)
+        .with_context(|| format!("importing {name}"))?;
+    // Pixel art: sampled nearest, so each texel stays a square, and left at
+    // its size by `balaur shrink`, which reads the same key.
+    let sampling = format!(
+        "# Written by `balaur import` for a sprite editor's pixels.\n{} = \"nearest\"\n",
+        balaur_core::import::keys::FILTER
+    );
+    // The page is one image the reader composited, so it is held either way.
+    let mut outputs = vec![
+        Output::Held {
+            path: balaur_core::import::sidecar_of(&texture),
+            bytes: sampling.into_bytes(),
+        },
+        Output::Held {
+            path: texture,
+            bytes: imported.page,
+        },
+        Output::Held {
+            path: format!("sheets/{stem}.toml"),
+            bytes: imported.sheet.into_bytes(),
+        },
     ];
     if let Some(clips) = imported.clips {
-        written.push((format!("animations/{stem}.toml"), clips.into_bytes()));
+        outputs.push(Output::Held {
+            path: format!("animations/{stem}.toml"),
+            bytes: clips.into_bytes(),
+        });
     }
-    let mut out = Imported::default();
-    for (rel, data) in written {
-        let path = project.join(&rel);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(&path, data)?;
-        out.files.push(rel);
-    }
-    out.note = format!(
-        "{} frames on a {}x{} page",
-        imported.frames, imported.width, imported.height
-    );
-    Ok(out)
+    Ok(Plan {
+        outputs,
+        next: 0,
+        scene: None,
+        note: format!(
+            "{} frames on a {}x{} page",
+            imported.frames, imported.width, imported.height
+        ),
+    })
 }
 
 /// `balaur import model.glb --project game`: `models/model.glb` (and the
 /// files a `.gltf` names beside itself), `scenes/model.toml` and, with
 /// animations, `animations/model.toml`.
-fn import_model(file: &Path, project: &Path) -> Result<Imported> {
-    let bytes = std::fs::read(file).with_context(|| format!("reading {}", file.display()))?;
+fn plan_model(name: &str, bytes: &[u8], side: SideReader<'_>) -> Result<Plan> {
+    let file = Path::new(name);
     let stem = import_stem(file)?;
     let extension = file
         .extension()
@@ -160,37 +521,47 @@ fn import_model(file: &Path, project: &Path) -> Result<Imported> {
         .unwrap_or("glb")
         .to_ascii_lowercase();
     let model_file = format!("{stem}.{extension}");
-    let directory = file.parent().map(Path::to_path_buf).unwrap_or_default();
-    let side = |uri: &str| -> Result<Vec<u8>> {
-        let path = directory.join(uri);
-        std::fs::read(&path).with_context(|| format!("reading {}", path.display()))
-    };
-    let imported = balaur::glb::import(&bytes, &model_file, &side)?;
-    let models = project.join("models");
-    std::fs::create_dir_all(&models)?;
-    std::fs::create_dir_all(project.join("scenes"))?;
-    let mut out = Imported::default();
-    std::fs::write(models.join(&model_file), &bytes)?;
-    out.files.push(format!("models/{model_file}"));
-    for (name, data) in &imported.files {
-        let path = models.join(name);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(&path, data)?;
-        out.files.push(format!("models/{name}"));
+    let imported = balaur::glb::import(bytes, &model_file, side)?;
+    let scene_toml = imported.scene_toml()?;
+    let clips_toml = imported.clips_toml()?;
+    // The source first, so the bytes the parse needed are written and dropped
+    // before its textures start crossing.
+    let mut outputs = vec![Output::Held {
+        path: format!("models/{model_file}"),
+        bytes: bytes.to_vec(),
+    }];
+    for (name, beside) in imported.files {
+        let path = format!("models/{name}");
+        outputs.push(match beside {
+            Beside::Bytes(bytes) => Output::Held { path, bytes },
+            Beside::Named(uri) => Output::Beside { path, uri },
+        });
     }
-    let scene_rel = format!("scenes/{stem}.toml");
-    std::fs::write(project.join(&scene_rel), imported.scene_toml()?)?;
-    out.files.push(scene_rel.clone());
-    out.scene = Some(scene_rel);
-    if let Some(clips) = imported.clips_toml()? {
-        std::fs::create_dir_all(project.join("animations"))?;
-        let library = format!("animations/{stem}.toml");
-        std::fs::write(project.join(&library), clips)?;
-        out.files.push(library);
+    // The shader the generated materials draw with, at its own path rather
+    // than under `models/`.
+    for (path, text) in imported.documents {
+        outputs.push(Output::Held {
+            path,
+            bytes: text.into_bytes(),
+        });
     }
-    Ok(out)
+    let scene = format!("scenes/{stem}.toml");
+    outputs.push(Output::Held {
+        path: scene.clone(),
+        bytes: scene_toml.into_bytes(),
+    });
+    if let Some(clips) = clips_toml {
+        outputs.push(Output::Held {
+            path: format!("animations/{stem}.toml"),
+            bytes: clips.into_bytes(),
+        });
+    }
+    Ok(Plan {
+        outputs,
+        next: 0,
+        scene: Some(scene),
+        note: String::new(),
+    })
 }
 
 #[cfg(test)]
@@ -223,14 +594,20 @@ mod tests {
     fn importing_a_sprite_writes_a_page_a_sheet_and_a_clip_per_tag() {
         let project = tempfile::tempdir().unwrap();
         import_file(Path::new(ASEPRITE_FIXTURE), project.path(), &[]).unwrap();
-        let png = std::fs::read(project.path().join("art/walk.png")).unwrap();
-        assert_eq!(&png[1..4], b"PNG");
+        let page = std::fs::read(project.path().join("art/walk.webp")).unwrap();
+        assert_eq!(&page[..4], b"RIFF", "the atlas page is a WebP");
+        assert_eq!(&page[8..12], b"WEBP");
+        let sampling = std::fs::read_to_string(project.path().join("art/walk.webp.toml")).unwrap();
+        assert!(
+            sampling.contains("nearest"),
+            "pixel art samples nearest: {sampling}"
+        );
         let sheet: toml::Value = toml::from_str(
             &std::fs::read_to_string(project.path().join("sheets/walk.toml")).unwrap(),
         )
         .unwrap();
         let sheet = balaur_render::SpriteSheet::parse(&sheet).unwrap();
-        assert_eq!(sheet.texture, "art/walk.png");
+        assert_eq!(sheet.texture, "art/walk.webp");
         assert_eq!(sheet.frames.len(), 3);
         let clips: toml::Value = toml::from_str(
             &std::fs::read_to_string(project.path().join("animations/walk.toml")).unwrap(),
@@ -261,6 +638,121 @@ mod tests {
             crate::scene_check::loaded(&scene),
             vec![("cave".to_string(), vec!["Walls".to_string()])]
         );
+    }
+
+    /// Bytes and a path are the same import: the drop a browser tab takes and
+    /// the command a desktop runs write the same files.
+    #[test]
+    fn bytes_and_a_path_import_the_same_files() {
+        let from_path = tempfile::tempdir().unwrap();
+        let by_path = import_file(Path::new(ASEPRITE_FIXTURE), from_path.path(), &[]).unwrap();
+
+        let from_bytes = tempfile::tempdir().unwrap();
+        let bytes = std::fs::read(ASEPRITE_FIXTURE).unwrap();
+        let mut sink = crate::ProjectSink::new(from_bytes.path());
+        let by_bytes = crate::import_bytes(
+            "walk.aseprite",
+            &bytes,
+            &mut sink,
+            &balaur_core::glb::no_side_files,
+            &[],
+        )
+        .unwrap();
+
+        assert_eq!(by_path.files, by_bytes.files);
+        assert_eq!(by_path.note, by_bytes.note);
+        assert!(!by_path.files.is_empty());
+        for rel in &by_path.files {
+            assert_eq!(
+                std::fs::read(from_path.path().join(rel)).unwrap(),
+                std::fs::read(from_bytes.path().join(rel)).unwrap(),
+                "{rel} differs"
+            );
+        }
+    }
+
+    /// The importer reads and writes through the engine's file backend, which
+    /// is what lets a browser tab import into the project it holds in memory.
+    #[test]
+    fn an_import_reads_and_writes_the_backend_and_not_the_disk() {
+        let fs = std::rc::Rc::new(balaur_core::files::MemoryFs::new());
+        let bytes = std::fs::read(ASEPRITE_FIXTURE).unwrap();
+        fs.seed(Path::new("/source"), [("walk.aseprite".to_string(), bytes)]);
+        balaur_core::files::set_default(fs.clone());
+
+        let imported =
+            import_file(Path::new("/source/walk.aseprite"), Path::new("/game"), &[]).unwrap();
+
+        let held = fs.snapshot();
+        assert!(!imported.files.is_empty());
+        for rel in &imported.files {
+            assert!(
+                held.contains_key(&format!("/game/{rel}")),
+                "{rel} is not in the backend; it has {:?}",
+                held.keys().collect::<Vec<_>>()
+            );
+            assert!(
+                !Path::new("/game").join(rel).exists(),
+                "{rel} reached the disk"
+            );
+        }
+    }
+
+    /// A plan writes one file per slice, which is what lets a caller keep its
+    /// frame: the same files land as `import_bytes` writes in one call.
+    #[test]
+    fn a_plan_writes_one_file_per_slice() {
+        use crate::Sink as _;
+        use balaur_core::task::Progress;
+
+        let bytes = std::fs::read(ASEPRITE_FIXTURE).unwrap();
+        let written = tempfile::tempdir().unwrap();
+        let mut plan = crate::plan_bytes(
+            "walk.aseprite",
+            &bytes,
+            &balaur_core::glb::no_side_files,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            plan.outputs(),
+            4,
+            "a page, its sampling, a sheet and a clip library"
+        );
+
+        let mut sink = crate::ProjectSink::new(written.path());
+        let mut slices = 0;
+        loop {
+            // What it is about to write is known before it writes it, which is
+            // the name a progress report carries.
+            let next = plan.peek().map(str::to_string);
+            let progress = plan
+                .write_next(&mut sink, &balaur_core::glb::no_side_files)
+                .unwrap();
+            if let Some(path) = next {
+                slices += 1;
+                assert!(
+                    written.path().join(&path).exists(),
+                    "{path} was announced and not written"
+                );
+            }
+            if progress == Progress::Done {
+                break;
+            }
+        }
+        assert_eq!(slices, 4, "one slice per file");
+
+        // The same import in one call, for comparison.
+        let whole = tempfile::tempdir().unwrap();
+        let at_once = import_file(Path::new(ASEPRITE_FIXTURE), whole.path(), &[]).unwrap();
+        assert_eq!(at_once.files, sink.written());
+        for rel in &at_once.files {
+            assert_eq!(
+                std::fs::read(whole.path().join(rel)).unwrap(),
+                std::fs::read(written.path().join(rel)).unwrap(),
+                "{rel} differs"
+            );
+        }
     }
 
     #[test]

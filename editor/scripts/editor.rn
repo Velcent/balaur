@@ -23,10 +23,12 @@ mod inputview;
 mod inspector;
 mod layout;
 mod library;
+mod manager;
 mod left;
 mod lint;
 mod menu;
 mod model;
+mod newnode;
 mod overlays;
 mod palette;
 mod pen;
@@ -75,9 +77,14 @@ pub fn init(this) {
         events_open: false,
         zoom: 100.0,
         playing: false,
+        formed: false,
         palette: false,
         palette_query: "",
         palette_submit: false,
+        newnode: false,
+        newnode_query: "",
+        renaming: false,
+        rename_text: "",
         chip_state: #{},
         compact: false,
         // Empty until the first frame reads the screen, so whatever class it
@@ -95,6 +102,8 @@ pub fn init(this) {
         // Whether the first frame has run: the start-up states apply on it,
         // after the screen's room has folded the docks.
         platform_read: false,
+        release_at: -1,
+        states_applied: false,
         start_states: "",
         script_buffers: #{},
         schemas: #{},
@@ -128,6 +137,14 @@ pub fn init(this) {
         fps: 0.0,
         // -1 when the layout self-test is not running.
         layout_demo: -1,
+        // The same for the row views' test, and the row it asks for.
+        rows_demo: -1,
+        import_demo: -1,
+        import_waited: 0,
+        rows_want: 0,
+        rows_waited: 0,
+        gesture_demo: -1,
+        gesture_from: [],
         frame: 0,
         shot: None,
         // `frames=<dir>`: a PNG every `every` frames from `from`, numbered.
@@ -141,6 +158,7 @@ pub fn init(this) {
         // unfolded panel is the way back, not a viewport.
         stage_chrome: true,
         rail_shut: false,
+        chrome_off: false,
         fontdemo: false,
         menu_open: false,
         // A document is over the scene; the hooks list is beside it.
@@ -173,6 +191,7 @@ pub fn init(this) {
         log_cache: (),
         panels: (),
         palette_cache: (),
+        newnode_cache: (),
         brand: (),
         mirror: (),
         theme: theme::dark(),
@@ -191,6 +210,12 @@ pub fn init(this) {
         debug: shell::debug_state(),
         events: events::state(),
         exporter: exporter::state(),
+        // This batch of imports, by the source each reports: the ones running
+        // and the ones lately ended. `chrome::toast` draws them.
+        jobs: #{},
+        // What `imports:` still has to start, and the frame it starts on.
+        import_queue: [],
+        import_from: 0,
         session: session::state(),
         settings: settings::state(),
         window: window::state(),
@@ -198,6 +223,7 @@ pub fn init(this) {
         showcase: showcase::state(),
         inputview: inputview::state(),
         library: library::state(),
+        manager: manager::state(),
         lint: lint::state(),
         assets: dock::assets_state(),
         plugins: #{},
@@ -206,9 +232,11 @@ pub fn init(this) {
     this.S = S;
 
     model::load(S);
+    ui::set_loading(0.3, "");
     plugins::load(S);
-    // Exports run off the frame and report back here as they go.
+    // Exports and imports run off the frame and report back here as they go.
     export::listen(this.node, #{});
+    import::listen(this.node, #{});
     // Before the theme and the scale are pushed: the preferences decide both,
     // and until this ran they only took effect once Settings was opened.
     settings::load_files(S);
@@ -241,6 +269,11 @@ pub fn on_export(this, e) {
     exporter::report(this.S, e);
 }
 
+// Every import reports here: what is coming, each file, then the end.
+pub fn on_import(this, e) {
+    dropin::report(this.S, e);
+}
+
 pub fn update(this, dt) {
     let S = this.S;
     // Smoothed frame rate for the status bar; a raw 1/dt reads as noise.
@@ -249,12 +282,36 @@ pub fn update(this, dt) {
         S.fps = (if S.fps == 0.0 { now } else { S.fps }) * 0.9 + now * 0.1;
     }
     S.frame += 1;
+    shell::release_world(S);
+    // The splash holds until the shell has settled: the first pass places
+    // the docks, the second fills the tree once the mirror resolves, the
+    // third is the first drawn with everything in place.
+    if !S.formed {
+        if S.frame >= 3 && S.refs.len() == S.doc.len() {
+            S.formed = true;
+            ui::loaded();
+        } else {
+            ui::set_loading(0.4 + 0.2 * util::f(S.frame), "");
+        }
+    }
     let shot_some = S.shot;
     if let Some(shot) = shot_some {
         if S.frame == 60 {
             render::screenshot(shot);
             report_view(S);
         }
+    }
+    // A run with no window never calls `draw_ui`, so its states land here: by
+    // this frame a drawn run has measured its screen twice over.
+    if S.frame >= HEADLESS_STATES_AT && !S.platform_read {
+        apply_start_states(S);
+    }
+    // The start screen has no scene to step, no selection to follow and no
+    // gizmo to drag: what it needs from a frame is the shot and the states.
+    if manager::showing(S) {
+        apply_start_states(S);
+        ui::request_repaint();
+        return;
     }
     let cap = S.capture;
     if cap is Object && S.frame >= cap.from && (S.frame - cap.from) % cap.every == 0 {
@@ -295,6 +352,20 @@ pub fn update(this, dt) {
     if S.layout_demo >= 0 {
         selftest::layout_step(S);
     }
+    if S.rows_demo >= 0 {
+        selftest::rows_step(S);
+    }
+    if S.import_demo >= 0 {
+        selftest::import_step(S);
+    }
+    // One queued import a frame, so a shot catches several at once.
+    if !S.import_queue.is_empty() && S.frame >= S.import_from {
+        let next = S.import_queue.remove(0);
+        dropin::take(S, next);
+    }
+    if S.gesture_demo >= 0 {
+        selftest::gesture_step(S);
+    }
     if S.settings.demo >= 0 {
         selftest::settings_step(S);
     }
@@ -302,8 +373,14 @@ pub fn update(this, dt) {
     // A replay or a showcase feeds the pointer into the snapshot the viewport
     // tools read, so a drag would follow the feed rather than the mouse.
     if !session::scrubbing(S) && !showcase::feeding(S) {
-        gizmo::update(S);
-    textedit::update(S);
+        // Two fingers on the stage are the camera's, so a gizmo never sees
+        // the frame they drive and the backend's own orbit stands off.
+        if viewport::camera_gesture(S) {
+            render::set_camera_input(false);
+        } else {
+            gizmo::update(S);
+        }
+        textedit::update(S);
     }
     anim::update(S);
     // Scene-tree UI widgets draw during play (and for preview in the Interface
@@ -353,16 +430,36 @@ pub fn update(this, dt) {
         }
     }
     // What moves without input asks for the next pass; the rest waits for one.
-    // A dock folding away and a gizmo drag both move the picture while the
-    // pointer holds still, so both are in the list.
+    // A folding dock, a gizmo drag and an import counting up all move the
+    // picture while the pointer holds still, so all three are listed.
+    let telling = !S.jobs.is_empty();
     if S.playing || S.showcase is Object || session::scrubbing(S) || S.capture is Object
         || S.session.demo is Object || S.layout_demo >= 0 || S.settings.demo >= 0
+        || S.rows_demo >= 0
+        || S.gesture_demo >= 0 || telling
         || layout::animating(S) || S.gizmo.drag is Object
     {
         ui::request_repaint();
     }
     if let Some(_) = S.debug.demo {
         ui::request_repaint();
+    }
+}
+
+/// The frame a run that has drawn nothing takes to be headless.
+const HEADLESS_STATES_AT = 3;
+
+// The `--state` list, applied once. Read here rather than at `init`, because
+// a state that folds a dock has to run after the screen has been measured.
+fn apply_start_states(S) {
+    if S.states_applied {
+        return;
+    }
+    S.states_applied = true;
+    for token in S.start_states.split(',') {
+        if token != "" {
+            shell::apply_start_state(S, token);
+        }
     }
 }
 
@@ -385,11 +482,7 @@ pub fn draw_ui(this) {
     S.platform_read = true;
     docks::follow_screen(S, ui::width_class(), ui::height_class());
     if first {
-        for token in S.start_states.split(',') {
-            if token != "" {
-                shell::apply_start_state(S, token);
-            }
-        }
+        apply_start_states(S);
     }
 
     // The popup owns the arrows, Tab, Enter and Escape while it is open, so
@@ -519,6 +612,12 @@ pub fn draw_ui(this) {
     }
 
     showcase::draw(S);
+    // The start screen has the window to itself: no project is open, so there
+    // is no scene to draw behind it and no dock to put over it.
+    if manager::showing(S) {
+        manager::draw(S, S.theme);
+        return;
+    }
     // Stage: decide what is showing, size every sheet once, then draw them.
     // Nothing below computes a rect of its own.
     center::modes(S);
@@ -527,6 +626,7 @@ pub fn draw_ui(this) {
     // cannot be filled until the dock's width is known.
     chrome::top_bar(S);
     chrome::status_bar(S, S.theme, S.layout.bottom.w);
+    chrome::toast(S, S.theme);
     docks::right_foot(S);
     center::draw(S);
     // Every dock is nodes now: the scene lays them out, paints them, and calls
@@ -546,6 +646,8 @@ pub fn draw_ui(this) {
     textedit::draw(S, S.theme);
     settings::draw(S);
     palette::draw(S);
+    newnode::draw(S);
+    left::rename_draw(S);
 }
 
 // Six digits, so a frame directory sorts as it was captured.
@@ -621,6 +723,44 @@ pub fn draw_form_row(this) {
 
 pub fn draw_dock_bottom(this) {
     docks::draw_bottom_body(this.S, this.S.theme);
+}
+
+// The outliner's context menu, one method a row. The right click that opened
+// it picked the row under the pointer, so each acts on the selection.
+pub fn tree_add_child(this) {
+    newnode::open(this.S);
+}
+
+pub fn tree_move_up(this) {
+    model::move_sibling(this.S, -1);
+}
+
+pub fn tree_move_down(this) {
+    model::move_sibling(this.S, 1);
+}
+
+pub fn tree_attach_script(this) {
+    shell::attach_script(this.S);
+}
+
+pub fn tree_duplicate(this) {
+    model::duplicate_selected(this.S);
+}
+
+pub fn tree_toggle_hidden(this) {
+    arrange::toggle_hidden(this.S);
+}
+
+pub fn tree_toggle_locked(this) {
+    arrange::toggle_locked(this.S);
+}
+
+pub fn tree_rename(this) {
+    left::rename_open(this.S);
+}
+
+pub fn tree_delete(this) {
+    model::delete_selected(this.S);
 }
 
 pub fn hot_reload(this) {

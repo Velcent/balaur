@@ -14,16 +14,15 @@
 //! freed, with its name, parent, components and script. It is registered
 //! first, so every later source finds the entity it is about to write to.
 //!
-//! Everything is keyed by [`StableId`] rather than by entity index, because a
-//! respawned node is a new entity. The recorded index is kept as a fallback
-//! for a node that carries no id, which is a tree built by hand in a test
-//! rather than one loaded from a scene.
+//! Everything is keyed by [`StableId`](crate::components::StableId) rather
+//! than by entity index, because a respawned node is a new entity. The
+//! recorded index is kept beside it for a node with no id, which no spawn
+//! makes: every node is given one when it is spawned.
 
 use anyhow::{Context, Result};
 use hecs::Entity;
 use serde::{Deserialize, Serialize};
 
-use crate::components::StableId;
 use crate::engine::Engine;
 use crate::scene::{Children, Name, Parent, ScriptAttachment, collect_subtree};
 
@@ -149,6 +148,7 @@ pub(crate) fn build_core_sources(app: &mut crate::app::App) {
     app.add_snapshot_source("transforms", save_transforms, load_transforms);
     app.add_snapshot_source("appearance", save_appearance, load_appearance);
     app.add_snapshot_source("tags", save_tags, load_tags);
+    app.add_snapshot_source(crate::process::KEY, save_process, load_process);
     // The clock, so restoring a tick puts the tick number back too: a
     // rollback that re-ran tick 40 while the engine still counted 47 would
     // hand scripts a number the first run never saw.
@@ -255,6 +255,7 @@ fn load_transforms(eng: &Engine, value: &serde_json::Value) {
     };
     let world = eng.world();
     let root = eng.root();
+    let mut restored = Vec::new();
     for frame in frames {
         let Some(entity) = resolve(&world, root, frame.id.as_deref(), frame.entity) else {
             continue;
@@ -267,6 +268,70 @@ fn load_transforms(eng: &Engine, value: &serde_json::Value) {
         t.rotation = glamx::Quat::from_xyzw(v[3], v[4], v[5], v[6]);
         t.scale = glamx::Vec3::new(v[7], v[8], v[9]);
         t.skew = frame.skew;
+        restored.push(entity);
+    }
+    drop(world);
+    // The pair of poses a node was being drawn between is render-side state
+    // the restored tick knows nothing about; keeping it would streak a
+    // rolled-back node from where it was predicted to where it really is.
+    for entity in restored {
+        crate::interpolate::reset(eng, entity);
+    }
+}
+
+/// Keyed the way `TransformFrame` is. Written by `set_process`, so a
+/// re-simulated tick has to put it back the way it found it.
+#[derive(Serialize, Deserialize)]
+struct ProcessFrame {
+    id: Option<String>,
+    entity: u64,
+    mode: String,
+}
+
+fn save_process(eng: &Engine) -> serde_json::Value {
+    let world = eng.world();
+    let frames: Vec<ProcessFrame> = crate::scene::collect_subtree(&world, eng.root())
+        .into_iter()
+        .filter_map(|entity| {
+            let mode = crate::process::own(&world, entity);
+            (mode != crate::process::ProcessMode::Inherit).then(|| ProcessFrame {
+                id: crate::ids::of(&world, entity),
+                entity: entity.to_bits().get(),
+                mode: mode.name().to_string(),
+            })
+        })
+        .collect();
+    serde_json::to_value(frames).unwrap_or(serde_json::Value::Null)
+}
+
+fn load_process(eng: &Engine, value: &serde_json::Value) {
+    let frames: Vec<ProcessFrame> = match Vec::<ProcessFrame>::deserialize(value) {
+        Ok(frames) => frames,
+        Err(e) => {
+            tracing::error!(error = %e, "restoring process modes");
+            return;
+        }
+    };
+    let mut world = eng.world_mut();
+    let root = eng.root();
+    let listed: Vec<(hecs::Entity, crate::process::ProcessMode)> = frames
+        .iter()
+        .filter_map(|frame| {
+            let entity = resolve(&world, root, frame.id.as_deref(), frame.entity)?;
+            Some((entity, crate::process::ProcessMode::parse(&frame.mode)?))
+        })
+        .collect();
+    // A mode the snapshot does not list is one the node did not carry, so a
+    // mode set during the tick being re-run has to come back off.
+    let stale: Vec<hecs::Entity> = crate::scene::collect_subtree(&world, root)
+        .into_iter()
+        .filter(|e| !listed.iter().any(|(listed, _)| listed == e))
+        .collect();
+    for entity in stale {
+        crate::process::set(&mut world, entity, crate::process::ProcessMode::Inherit);
+    }
+    for (entity, mode) in listed {
+        crate::process::set(&mut world, entity, mode);
     }
 }
 
@@ -475,9 +540,7 @@ fn save_nodes(eng: &Engine) -> serde_json::Value {
             components,
         });
     }
-    let next_id = eng
-        .try_resource::<crate::ids::IdAllocator>()
-        .map_or(0, |a| a.borrow().next);
+    let next_id = crate::ids::next(eng);
     serde_json::to_value(NodesFrame { next_id, nodes }).unwrap_or(serde_json::Value::Null)
 }
 
@@ -495,9 +558,7 @@ fn load_nodes(eng: &Engine, value: &serde_json::Value) {
     for node in respawn_order(&frame.nodes) {
         respawn(eng, root, node);
     }
-    if let Some(allocator) = eng.try_resource::<crate::ids::IdAllocator>() {
-        allocator.borrow_mut().next = frame.next_id;
-    }
+    crate::ids::set_next(eng, frame.next_id);
 }
 
 /// Frame order for a respawn: parents first, then siblings by index.
@@ -591,9 +652,7 @@ fn respawn(eng: &Engine, root: Entity, node: &NodeFrame) {
     }
     let entity = {
         let mut world = eng.world_mut();
-        let entity = crate::scene::spawn_node_at(&mut world, &node.name, parent, node.index);
-        let _ = world.insert_one(entity, StableId(node.id.clone()));
-        entity
+        crate::scene::spawn_node_at(&mut world, &node.name, parent, node.index, node.id.clone())
     };
     for (name, text) in &node.components {
         let Ok(params) = toml::from_str::<toml::Value>(text) else {

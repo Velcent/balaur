@@ -1,16 +1,21 @@
-//! Identity for nodes spawned after the scene loaded.
+//! Identity for every node.
 //!
-//! A scene file's node carries its own `id`. One a script spawns carries
-//! none, and an entity index is not an identity two peers can negotiate: it
-//! is reproducible within one binary and meaningless across a wire. The
-//! allocator mints `<authority>:<counter>` in simulation order, so two peers
-//! stepping the same simulation mint the same sequence, and two authorities
-//! never mint the same id.
+//! A scene file's node carries its own `id`. Every other node is given one when
+//! it is spawned, because an entity index is not an identity two peers can
+//! negotiate: it is reproducible within one binary and meaningless across a
+//! wire. The allocator mints `<authority>:<counter>` in simulation order, so
+//! two peers stepping the same simulation mint the same sequence, and two
+//! authorities never mint the same id.
+//!
+//! The counter is a component on the root, not an engine resource, so the
+//! spawn functions that only hold the `World` can mint without reaching back
+//! for the engine a caller is usually already borrowing it from.
 //!
 //! Ids minted here are part of the snapshot: a rollback that re-simulates a
 //! spawn has to mint the same id the first run did, so the counter is
 //! restored with everything else.
 
+use anyhow::{Result, anyhow};
 use hecs::{Entity, World};
 
 use crate::components::StableId;
@@ -34,30 +39,82 @@ impl Default for IdAllocator {
     }
 }
 
-/// The next id, consumed.
-///
-/// Empty when no allocator is installed, which is the signal to leave the
-/// node without an id rather than to invent a colliding one.
-pub fn mint(eng: &Engine) -> String {
-    let Some(allocator) = eng.try_resource::<IdAllocator>() else {
-        return String::new();
-    };
-    let mut allocator = allocator.borrow_mut();
+/// The root a node hangs from, which carries the counter.
+fn root_of(world: &World, mut node: Entity) -> Entity {
+    while let Ok(parent) = world.get::<&crate::scene::Parent>(node) {
+        node = parent.0;
+    }
+    node
+}
+
+/// The counter the next id takes.
+#[must_use]
+pub fn next(eng: &Engine) -> u64 {
+    counter(&eng.world(), eng.root()).next
+}
+
+/// Put the counter back, as a replay does to where its recording started.
+pub fn set_next(eng: &Engine, next: u64) {
+    counter(&eng.world(), eng.root()).next = next;
+}
+
+/// The next id for a node spawned under `parent`, consumed.
+pub(crate) fn mint_under(world: &World, parent: Entity) -> String {
+    let mut allocator = counter(world, root_of(world, parent));
     let n = allocator.next;
     allocator.next += 1;
     format!("{}:{n}", allocator.authority)
 }
 
-/// Mint an id and put it on a freshly spawned node.
-///
-/// Takes the world it is handed rather than borrowing it again, so a caller
-/// mid-spawn does not deadlock on its own borrow.
-pub fn assign(eng: &Engine, world: &mut World, entity: Entity) {
-    let id = mint(eng);
-    if id.is_empty() {
-        return;
+/// The next id, consumed.
+pub fn mint(eng: &Engine) -> String {
+    mint_under(&eng.world(), eng.root())
+}
+
+/// A node's tree is always an engine's, whose root carries the counter from
+/// the moment it is spawned. A tree without one is a world nothing made nodes
+/// in the way nodes are made.
+fn counter(world: &World, root: Entity) -> hecs::RefMut<'_, IdAllocator> {
+    match world.get::<&mut IdAllocator>(root) {
+        Ok(allocator) => allocator,
+        Err(why) => panic!("the root of this tree carries no id allocator: {why}"),
     }
-    let _ = world.insert_one(entity, StableId(id));
+}
+
+/// An order for nodes that two runs agree on however many nodes each freed
+/// before: the stable id every node is given when it is made. Entity bits are
+/// reproducible only in a fresh process, which the editor is not.
+///
+/// # Errors
+/// When the entity is not a live node: every node is given an id when it is
+/// spawned, so one without is dead or was never a node.
+pub fn order_key(world: &World, entity: Entity) -> Result<String> {
+    world
+        .get::<&StableId>(entity)
+        .map(|id| id.0.clone())
+        .map_err(|_| {
+            let name = world.get::<&crate::scene::Name>(entity).map_or_else(
+                |_| String::from("an unnamed node"),
+                |n| format!("'{}'", n.0),
+            );
+            anyhow!("{name} is not a live node with a stable id, so nothing can order it")
+        })
+}
+
+/// `nodes` in [`order_key`] order.
+///
+/// # Errors
+/// When any of them has no id.
+pub fn sort_by_id(world: &World, nodes: &mut [Entity]) -> Result<()> {
+    let keys = nodes
+        .iter()
+        .map(|&e| order_key(world, e))
+        .collect::<Result<Vec<_>>>()?;
+    let mut order: Vec<usize> = (0..nodes.len()).collect();
+    order.sort_by(|&a, &b| keys[a].cmp(&keys[b]));
+    let sorted: Vec<Entity> = order.iter().map(|&i| nodes[i]).collect();
+    nodes.copy_from_slice(&sorted);
+    Ok(())
 }
 
 /// A node's stable id, if it has one.

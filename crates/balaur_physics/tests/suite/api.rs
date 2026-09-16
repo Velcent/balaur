@@ -103,12 +103,12 @@ fn pausing_stops_the_simulation_and_resuming_continues_it() {
     assert!(moved < 0.0);
 
     app.engine
-        .resource::<balaur_physics::PhysicsState>()
+        .resource::<balaur_physics::PhysicsState3d>()
         .borrow_mut()
         .paused = true;
     assert!(
         app.engine
-            .resource::<balaur_physics::PhysicsState>()
+            .resource::<balaur_physics::PhysicsState3d>()
             .borrow()
             .paused
     );
@@ -122,7 +122,7 @@ fn pausing_stops_the_simulation_and_resuming_continues_it() {
     );
 
     app.engine
-        .resource::<balaur_physics::PhysicsState>()
+        .resource::<balaur_physics::PhysicsState3d>()
         .borrow_mut()
         .paused = false;
     for _ in 0..30 {
@@ -236,8 +236,12 @@ fn a_sensor_reports_overlap_without_collision_response() {
     let mut seen_from_sensor = false;
     for _ in 0..240 {
         app.tick(1.0 / 60.0);
-        seen_from_ball |= balaur_physics::dim2::overlaps(&app.engine, ball).contains(&sensor);
-        seen_from_sensor |= balaur_physics::dim2::overlaps(&app.engine, sensor).contains(&ball);
+        seen_from_ball |= balaur_physics::dim2::overlaps(&app.engine, ball)
+            .unwrap()
+            .contains(&sensor);
+        seen_from_sensor |= balaur_physics::dim2::overlaps(&app.engine, sensor)
+            .unwrap()
+            .contains(&ball);
     }
     let final_y = app
         .engine
@@ -362,7 +366,7 @@ fn named_body(app: &App, name: &str, kind: &str) -> Entity {
 }
 
 fn joint_count(app: &App) -> usize {
-    let state = app.engine.resource::<balaur_physics::PhysicsState>();
+    let state = app.engine.resource::<balaur_physics::PhysicsState3d>();
 
     state.borrow().joints.len()
 }
@@ -416,11 +420,11 @@ fn a_disabled_joint_is_not_retried_every_step() {
     for _ in 0..5 {
         app.tick(1.0 / 60.0);
     }
-    let state = app.engine.resource::<balaur_physics::PhysicsState>();
+    let state = app.engine.resource::<balaur_physics::PhysicsState3d>();
     let state = state.borrow();
     assert!(state.joints.is_empty(), "a disabled joint was made anyway");
     assert!(
-        balaur_physics::joint::pending(&state).is_empty(),
+        balaur_physics::joint::pending(&state, &app.engine.world()).is_empty(),
         "a disabled joint is on the retry list, so it re-applies every step"
     );
 }

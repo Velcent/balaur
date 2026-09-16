@@ -25,6 +25,7 @@ pub mod debugger_api;
 pub mod desktop;
 pub mod desktop_api;
 pub mod digest;
+pub mod document_paths;
 pub mod engine;
 pub mod engine_api;
 mod engine_docs;
@@ -34,12 +35,14 @@ pub mod file_api;
 pub mod files;
 pub mod geometry2d;
 pub mod glb;
+mod glb_material;
 pub mod handler;
 pub mod heightfield;
 pub mod hooks;
 pub mod ids;
 pub mod ignore;
 pub mod import;
+pub mod interpolate;
 pub mod logbuf;
 pub mod math_api;
 pub mod mesh;
@@ -51,6 +54,7 @@ pub mod path;
 pub mod plugins;
 pub mod presets;
 pub mod primitive;
+pub mod process;
 pub mod project;
 mod project_files;
 pub mod replay;
@@ -71,6 +75,7 @@ pub mod standalone;
 pub mod states;
 pub mod strings;
 pub mod tags;
+pub mod task;
 pub mod tiles;
 pub mod time;
 pub mod timer;
@@ -84,7 +89,7 @@ pub mod voxels;
 
 pub use app::{
     App, AppConfig, FIXED_DT, MAX_SUBSTEPS, ScriptArgs, ScriptHostFactory, ScriptSetup, Stage,
-    TICK_HZ,
+    TICK_HZ, fixed_dt, max_substeps, set_tick_hz, tick_hz,
 };
 pub use assets::{AssetRef, AssetState, AssetTypeRegistry};
 pub use collections::{DetHashMap, DetHashSet};

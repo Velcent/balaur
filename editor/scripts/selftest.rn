@@ -12,6 +12,7 @@ use crate::library;
 use crate::history;
 use crate::lint;
 use crate::model;
+use crate::newnode;
 use crate::bonemap;
 use crate::polygon;
 use crate::rig;
@@ -102,6 +103,102 @@ pub fn component_write(S) {
     shell::undo(S);
     let back = float_prop(model::live(S, S.sel).unwrap(), comp, prop).unwrap_or(-1.0);
     check(util::abs(back - was) < 1e-6, format!("undo restores {}.{} ({} vs {})", comp, prop, back, was));
+}
+
+// Renaming: the tree's context menu had no way to do it, and nothing else
+// in the shell did either.
+pub fn rename(S) {
+    let was = S.doc[S.sel].name;
+    crate::left::rename_open(S);
+    check(S.renaming, "the rename sheet opens");
+    check(S.rename_text == was, format!("it starts from the node's name ({})", S.rename_text));
+
+    model::rename_selected(S, "Renamed");
+    check(S.doc[S.sel].name == "Renamed", format!("the document takes it ({})", S.doc[S.sel].name));
+    let found = model::live(S, S.sel).unwrap();
+    check(found.name() == "Renamed",
+        format!("and so does the live node ({})", found.name()));
+
+    // A second node cannot take the same name, or `find_node` answers with
+    // whichever came first.
+    let other = -1;
+    for (i, node) in S.doc.iter().enumerate() {
+        if i != S.sel && node.name != "Renamed" {
+            other = i;
+            break;
+        }
+    }
+    if other < 0 {
+        shell::undo(S);
+        check(S.doc[S.sel].name == was, format!("undo puts the old name back ({})", S.doc[S.sel].name));
+        log::info("selftest rename: one node, so no name to collide with, skipping the rest");
+        return;
+    }
+    let other_was = S.doc[other].name;
+    crate::shell::choose(S, other);
+    model::rename_selected(S, "Renamed");
+    check(S.doc[S.sel].name != "Renamed",
+        format!("a taken name is made unique ({})", S.doc[S.sel].name));
+
+    shell::undo(S);
+    check(S.doc[other].name == other_was,
+        format!("undo puts the old name back ({})", S.doc[other].name));
+}
+
+// The node picker: what it offers, how it is grouped, and that a pick
+// really builds the node rather than only closing the sheet.
+pub fn node_picker(S) {
+    newnode::open(S);
+    check(S.newnode, "the picker opens");
+    let rows = newnode::catalogue(S);
+    check(rows.len() > 0, format!("the picker offers something ({} rows)", rows.len()));
+
+    // Every row lands in a group, and a dimensioned one lands in its own.
+    let groups = #{};
+    let placed = 0;
+    for row in rows {
+        if row.group != "" {
+            placed += 1;
+        }
+        groups[row.group] = true;
+        if row.name == "camera2d" {
+            check(row.group == "2D", format!("camera2d is filed under 2D (got {})", row.group));
+        }
+        if row.name == "camera3d" {
+            check(row.group == "3D", format!("camera3d is filed under 3D (got {})", row.group));
+        }
+    }
+    check(placed == rows.len(), "every row has a group");
+    check(groups.contains_key("3D") && groups.contains_key("2D"),
+        "both dimensions are groups of their own");
+    // The one thing a picker must not offer: every node already has one.
+    let has_transform = false;
+    for row in rows {
+        if row.name == "transform" {
+            has_transform = true;
+        }
+    }
+    check(!has_transform, "`transform` is not offered as a node to add");
+
+    // A preset pick builds the node and shuts the sheet.
+    let before = S.doc.len();
+    let chosen = ();
+    for row in rows {
+        if row.preset {
+            chosen = row;
+            break;
+        }
+    }
+    if chosen is Object {
+        newnode::place(S, chosen);
+        check(S.doc.len() == before + 1,
+            format!("picking {} adds a node ({} -> {})", chosen.name, before, S.doc.len()));
+        check(!S.newnode, "and closes the picker");
+        let made = S.doc[S.sel];
+        check(made.len() > 3, format!("the new node carries the preset's components ({})", made.len()));
+    } else {
+        check(false, "no preset to pick");
+    }
 }
 
 // Mutate, undo, redo; assert the document, the mirror and the selection all
@@ -896,8 +993,8 @@ pub fn tooling(S) {
         for one in found {
             names.push(one.label);
         }
-        check(util::contains(names, "add_body"),
-            format!("physics2d::a offers add_body (got {})", util::join(names, ", ")));
+        check(util::contains(names, "apply_impulse"),
+            format!("physics2d::a offers apply_impulse (got {})", util::join(names, ", ")));
         check(found[0].doc != "", "the first completion carries its doc line");
     }
 
@@ -1012,6 +1109,12 @@ pub fn instances(S) {
 // The inspector's script field: a new name writes and attaches a file, a
 // changed name moves it, remove leaves it on disk, and undo walks it all back.
 pub fn script_paths(S) {
+    // Pure string rules, so they hold whatever the project has in it.
+    check(model::names_a_file("art/hero.png"), "a project-relative file is a file name");
+    check(!model::names_a_file("/games/art/hero.png"), "a rooted path is not");
+    check(!model::names_a_file("D:/games/art/hero.png"), "nor is a Windows drive path");
+    check(!model::names_a_file("D:\\games\\art\\hero.png"), "with either separator");
+    check(!model::names_a_file("../Rig"), "and a node path is not a file");
     let picked = None;
     for (i, node) in S.doc.iter().enumerate() {
         if picked.is_none() && !node.contains_key("script") && !model::is_instanced(node) {
@@ -1081,6 +1184,186 @@ const REC_UNTIL = 9;
 const OPEN_AT = 10;
 const CHECK_AT = 28;
 
+/// The start screen's own module: a project made from a template, the row it
+/// leaves in the list, and the row forgotten again. Writes under the editor's
+/// own data directory, which is the one place it owns on every machine.
+pub fn manager_screen(S) {
+    let home = engine::user_data_dir() + "/selftest-project";
+    let made = util::obj(project::create(home, "empty"));
+    let failed = made.get("error");
+    if let Some(why) = failed {
+        check(false, format!("a new project from the empty template ({})", why));
+        return;
+    }
+    check(made.name != "", format!("a new project from the empty template ({})", made.name));
+    let listed = util::vec(project::recent());
+    let found = listed.iter().any(|row| util::obj(row).path == home);
+    check(found, format!("it is the newest of {} remembered", listed.len()));
+    let first = util::obj(listed[0]);
+    check(first.get("exists").unwrap_or(false) == true, "and its folder is there");
+    project::forget(home);
+    let after = util::vec(project::recent());
+    let still = after.iter().any(|row| util::obj(row).path == home);
+    check(!still, "forgetting it drops the row and leaves the folder");
+    check(util::vec(project::templates()).len() > 0, "the library offers templates to start from");
+    check(project::home() != "", "and a folder to put a new project in");
+    // A tab opens a project through the page, and the screen's own commands
+    // are hidden there. This run is a process, so it says so.
+    check(!project::in_tab(), "a process, not a tab, so the screen may open one");
+    example_projects(S);
+    converting_a_project(S);
+    versions_half(S);
+}
+
+// The smallest Godot project the importer will read: a name, a main scene,
+// and that scene.
+const GODOT_PROJECT = "config_version=5\n\n[application]\n\nconfig/name=\"Selftest\"\nrun/main_scene=\"res://main.tscn\"\n";
+const GODOT_SCENE = "[gd_scene format=3]\n\n[node name=\"Root\" type=\"Node2D\"]\n";
+
+// Import project: the button's own half, without the open that would quit
+// this process. What it writes is a balaur project beside the one it read.
+fn converting_a_project(S) {
+    let home = engine::user_data_dir();
+    let source = home + "/selftest-godot";
+    fs::write(source + "/project.godot", GODOT_PROJECT);
+    fs::write(source + "/main.tscn", GODOT_SCENE);
+    // Where new projects land. The screen sets this from the preferences; a
+    // run editing a project never opened the screen, so it is empty here and
+    // `converted` would aim at the root of the filesystem.
+    S.manager.parent = home;
+    let target = home + "/selftest-godot-balaur";
+    fs::remove(target);
+
+    let landed = crate::manager::converted(S, source);
+    check(landed == target, format!("a project folder converts beside itself ({})", landed));
+    check(fs::exists(target + "/project.toml"), "with settings of its own");
+    check(fs::exists(target + "/scenes/main.toml"), "and every scene it read");
+    check(S.manager.note.contains("scene"), format!("saying what carried ({})", S.manager.note));
+
+    // A folder with no manifest is refused by name, not by a crash.
+    let empty = home + "/selftest-not-a-project";
+    fs::write(empty + "/notes.txt", "nothing to import here");
+    check(crate::manager::converted(S, empty) == "", "a folder with no project is refused");
+    check(S.manager.failed.contains("project.godot"),
+        format!("saying what it looked for ({})", S.manager.failed));
+
+    project::forget(target);
+    fs::remove(target);
+    fs::remove(source);
+    fs::remove(empty);
+}
+
+// The screen's other half: which build this is and what lines it may follow.
+// No network here: what a channel holds is a press, and CI has no releases.
+fn versions_half(S) {
+    let mine = util::obj(release::installed());
+    check(mine.version != "", format!("the build says which version it is ({})", mine.version));
+    let lines = util::vec(release::channels());
+    check(lines.len() == 5, format!("and names {} release lines to follow", lines.len()));
+    let named = lines.iter().any(|name| name == "nightly")
+        && lines.iter().any(|name| name == "stable");
+    check(named, "the rolling one and the settled one among them");
+    // A source build has no id and no tag, and says so rather than guessing.
+    let source = mine.get("source").unwrap_or(false) == true;
+    let told = if source { mine.id == "" } else { mine.id != "" };
+    check(told, "a build with no release id says so instead of inventing one");
+    // The feed, which is a network read: offline it answers one error row,
+    // and either way every row says which line it belongs to.
+    let rows = util::vec(release::releases());
+    let named = rows.iter().all(|row| {
+        let seen = util::obj(row);
+        seen.get("channel").unwrap_or("") != "" || seen.get("error").unwrap_or("") != ""
+    });
+    check(named, format!("every one of {} published releases names its line", rows.len()));
+}
+
+// The examples that ship beside the editor, and a copy of one. The copy is
+// what the screen opens, so the shipped example stays as it was.
+fn example_projects(S) {
+    let rows = util::vec(project::examples());
+    check(rows.len() > 0, format!("{} examples ship beside this build", rows.len()));
+    let hello = rows.iter().find(|row| util::obj(row).id == "hello");
+    let found = hello;
+    let one = match found {
+        Some(row) => util::obj(row),
+        None => {
+            check(false, "one of them is hello");
+            return;
+        }
+    };
+    check(one.get("note").unwrap_or("") != "", format!("and each says what it is ({})", one.note));
+    let into = engine::user_data_dir() + "/selftest-copies";
+    let made = util::obj(project::copy_example("hello", into));
+    let failed = made.get("error");
+    if let Some(why) = failed {
+        check(false, format!("a copy of an example is a project of its own ({})", why));
+        return;
+    }
+    check(fs::exists(made.path + "/project.toml"),
+        "a copy of an example is a project of its own");
+    check(made.path != one.path, "written beside the reader's projects, not over the example");
+    project::forget(made.path);
+}
+
+/// Two fingers on the stage drive the camera: a pinch dollies, a drag slides.
+/// Fed rather than felt, so CI answers for the half a phone would.
+pub fn gestures(S) {
+    S.gesture_demo = 0;
+}
+
+pub fn gesture_step(S) {
+    let n = S.gesture_demo;
+    S.gesture_demo = n + 1;
+    // A fed finger is read by the next tick and acted on later in that frame,
+    // so every act takes a frame and every reading the frame after.
+    let vp = S.layout.stage;
+    let mid = ((vp.x + vp.w / 2.0) * S.ui_scale, (vp.y + vp.h / 2.0) * S.ui_scale);
+    let (cx, cy) = mid;
+    let step = 40.0 * S.ui_scale;
+    if n == 0 {
+        let (_, _, _, tx, ty, tz, _, _) = render::camera_pose();
+        let (ex, ey, ez, _, _, _, _, _) = render::camera_pose();
+        S.gesture_from = [ex, ey, ez, tx, ty, tz];
+        input::feed_touch(1, cx - step, cy, "start");
+        input::feed_touch(2, cx + step, cy, "start");
+        return;
+    }
+    if n == 1 {
+        // Apart: a pinch out, which walks the eye towards what it looks at.
+        input::feed_touch(1, cx - step * 2.0, cy, "move");
+        input::feed_touch(2, cx + step * 2.0, cy, "move");
+        return;
+    }
+    if n == 3 {
+        let before = S.gesture_from;
+        let (ex, ey, ez, tx, ty, tz, _, _) = render::camera_pose();
+        let was = span(before[0] - before[3], before[1] - before[4], before[2] - before[5]);
+        let now = span(ex - tx, ey - ty, ez - tz);
+        check(now < was - 0.001, format!("a pinch out walks the camera in ({} to {})", was, now));
+        S.gesture_from = [ex, ey, ez, tx, ty, tz];
+        // Both fingers the same way: a two-finger drag, which slides the pair.
+        input::feed_touch(1, cx - step, cy, "move");
+        input::feed_touch(2, cx + step * 3.0, cy, "move");
+        return;
+    }
+    if n == 5 {
+        let before = S.gesture_from;
+        let (_, _, _, tx, ty, tz, _, _) = render::camera_pose();
+        let moved = span(tx - before[3], ty - before[4], tz - before[5]);
+        let want = span(before[0] - before[3], before[1] - before[4], before[2] - before[5]);
+        // A finger's own travel, near enough: the world under it moved with
+        // it rather than by a constant nobody picked.
+        check(moved > 0.05 && moved < want, format!("a two-finger drag slides what it looks at ({})", moved));
+        input::feed_touch(1, cx, cy, "end");
+        input::feed_touch(2, cx, cy, "end");
+        S.gesture_demo = -1;
+    }
+}
+
+fn span(x, y, z) {
+    math::sqrt(x * x + y * y + z * z)
+}
+
 // The centre must be showing the viewport when no document is open: a stray
 // split used to leave a collapsed code pane over it in every persona.
 pub fn layout(S) {
@@ -1117,6 +1400,7 @@ pub fn layout_step(S) {
     // under `touch` and the shell drawing larger, not by a floor on each
     // control: a floor grew the box and left the glyph and its bar behind.
     check_touch_targets(S);
+    check_dock_tools(S);
     check(covered(S, crate::layout::sheets(S)), "and the middle of every sheet does not");
     // The gutter is a `padding`, which the component keeps as four sides
     // whatever the scene spelled; reading all four back placed the shell at 0.
@@ -1208,6 +1492,27 @@ fn check_touch_targets(S) {
     check(smallest >= 44.0,
         format!("every control a finger picks clears 44 points (smallest {} in {})",
             smallest as i64, where));
+}
+
+// The panel's own tools sit at the end of the tab row, in a box of their own.
+// A hatch that only grows is one pixel wide in a row that hugs, and what it
+// draws is clipped: the filter, the hints and the add button all went that way.
+fn check_dock_tools(S) {
+    for side in ["left", "bottom", "right"] {
+        if crate::docks::folded(S, side) {
+            continue;
+        }
+        let box = match crate::docks::tools_box(side) {
+            Some(box) => box,
+            None => {
+                check(false, format!("the {} dock's tools have a box", side));
+                continue;
+            }
+        };
+        check(box.w > 20.0 && box.h > 12.0,
+            format!("the {} dock's tools have room to draw ({} × {})",
+                side, box.w as i64, box.h as i64));
+    }
 }
 
 fn overlapping(rects) {
@@ -1628,6 +1933,11 @@ pub fn theme_switch(S) {
 }
 
 
+/// A row's authored x, which a node that names no transform has at zero.
+fn doc_x(S, i) {
+    util::f(model::doc_transform(S.doc[i], "position", [0.0, 0.0, 0.0])[0])
+}
+
 /// The selection set: extending it, aligning two nodes, undoing that, and
 /// grouping. Every check is on document state, so it runs with no window.
 pub fn selecting(S) {
@@ -1636,17 +1946,21 @@ pub fn selecting(S) {
         return;
     }
     // Two siblings: a parent and its child are one root between them, and
-    // group would then adopt one node rather than two.
+    // group would then adopt one node rather than two. Apart on x if any are,
+    // or the align below has nothing to do and proves nothing.
     let a = 0;
     let b = 1;
     let found = false;
+    let apart = false;
     for i in 0..S.doc.len() {
         for j in i + 1..S.doc.len() {
             let same = S.doc[i].get("parent").unwrap_or("") == S.doc[j].get("parent").unwrap_or("");
-            if same && !found {
+            let differs = util::abs(doc_x(S, i) - doc_x(S, j)) > 1e-3;
+            if same && (!found || (differs && !apart)) {
                 a = i;
                 b = j;
                 found = true;
+                apart = differs;
             }
         }
     }
@@ -1663,15 +1977,16 @@ pub fn selecting(S) {
     check(selection::count(S) == 1 && S.sel == a, "toggling it again drops it");
 
     selection::set(S, [a, b]);
-    let before_a = S.doc[a].get("position").unwrap_or([0.0, 0.0, 0.0]);
+    let before = [doc_x(S, a), doc_x(S, b)];
     arrange::align(S, 0, "min");
-    let ax = util::f(model::live(S, a).unwrap().transform.global_position().x);
-    let bx = util::f(model::live(S, b).unwrap().transform.global_position().x);
-    check(util::abs(ax - bx) < 1e-4, "align on x puts two nodes on one plane");
+    // The document, not `global_position`: that is as of the last transform
+    // sync, and the two are siblings, so one parent frame holds both.
+    check(util::abs(doc_x(S, a) - doc_x(S, b)) < 1e-4,
+        format!("align on x puts two nodes on one plane ({} and {})", doc_x(S, a), doc_x(S, b)));
 
     shell::undo(S);
-    let back = S.doc[a].get("position").unwrap_or([0.0, 0.0, 0.0]);
-    check(util::f(back[0]) == util::f(before_a[0]), "undo puts the align back");
+    check(util::abs(doc_x(S, a) - before[0]) < 1e-4 && util::abs(doc_x(S, b) - before[1]) < 1e-4,
+        format!("undo puts the align back ({} and {})", doc_x(S, a), doc_x(S, b)));
     check(selection::count(S) == 2, "and restores the set that made it");
 
     let was = S.doc.len();
@@ -1828,6 +2143,25 @@ pub fn eventviews(S) {
 }
 
 
+/// The file a node's `mesh` asset names, read off the live node: the document
+/// held the right path all along, and the mirror's engine did not.
+fn mesh_file(S, name) {
+    for (i, node) in S.doc.iter().enumerate() {
+        if node.get("name").unwrap_or("") == name {
+            if let Some(found) = model::live(S, i) {
+                let mesh = util::obj(found.get_component("mesh"));
+                let reference = mesh.get("source").unwrap_or("");
+                // Rooted: this module declares an `assets` function of its own.
+                let (ok, definition) = script::attempt(|| ::assets::load(reference));
+                if ok && definition is Object {
+                    return definition.get("source").unwrap_or("");
+                }
+            }
+        }
+    }
+    ""
+}
+
 /// The project-relative files directly under one directory.
 fn named_under(S, dir) {
     let out = [];
@@ -1841,6 +2175,249 @@ fn named_under(S, dir) {
 
 /// The library: what the manifest lists, what placing an entry copies, and
 /// that a material lands on the selected node.
+/// The row views, read off the nodes they fill rather than off the scripts
+/// that fill them: what a view puts on a node is what the reader sees.
+///
+/// One stage a frame, because a node holds nothing until the shell has drawn
+/// it once and a pick is only answered by the pass after the one that made it.
+const TREE_NODE = "Editor/Shell/Body/Left/LeftSheet/LeftTree";
+
+pub fn row_views(S) {
+    S.rows_demo = 0;
+    S.rows_want = 0;
+    S.rows_waited = 0;
+}
+
+/// A model dropped on the window: the import runs off the frame, so what it
+/// wrote is asserted once the job says it is finished rather than straight
+/// after the drop.
+const DROPPED_MODEL = "examples/rig3d/models/column.glb";
+
+/// What the import writes, and so what the teardown removes. A project that
+/// already has one of these is not a clean drop: `examples/rig3d` ships
+/// `models/column.glb`, and the demo would overwrite it and then delete it.
+const IMPORT_WRITES = ["models/column.glb", "scenes/column.toml", "animations/column.toml"];
+
+/// What the import writes, so a run can take it back out: this imports into
+/// the example project the audit runs on, and a leftover would make the next
+/// run assert on files it did not write.
+fn clear_import(S) {
+    for rel in IMPORT_WRITES {
+        fs::remove(S.game_root + "/" + rel);
+    }
+}
+
+pub fn importing(S) {
+    if S.game_root == "" {
+        log::info("selftest jobdemo: no project open in this run, skipped");
+        return;
+    }
+    for rel in IMPORT_WRITES {
+        if fs::exists(S.game_root + "/" + rel) {
+            log::info("selftest jobdemo: " + rel + " is already here, skipped rather than \
+                overwrite it");
+            return;
+        }
+    }
+    S.import_demo = 0;
+    S.import_waited = 0;
+}
+
+pub fn import_step(S) {
+    if S.import_demo == 0 {
+        S.import_demo = 1;
+        crate::dropin::take(S, DROPPED_MODEL);
+        check(import::running() == 1, "a dropped model starts a job");
+        // Nothing is known about it yet: the job reads the file on its first
+        // slice, which is the next frame.
+        check(S.jobs.len() == 0, "and nothing is claimed before it has read anything");
+        return;
+    }
+    if S.import_demo == 1 {
+        S.import_demo = 2;
+        check(crate::dropin::in_flight(S) == 1, "the frame after, one import is in flight");
+        let job = S.jobs.get(DROPPED_MODEL).unwrap_or(#{ name: "", done: -1, files: -1 });
+        check(job.name == "column.glb", "the list says which file");
+        check(job.files == 3, "and how many files are coming");
+        check(job.done == 0, "none of them written yet");
+        return;
+    }
+    if S.import_demo == 2 {
+        if import::running() > 0 {
+            S.import_waited = S.import_waited + 1;
+            if S.import_waited > 300 {
+                S.import_demo = -1;
+                log::info("selftest jobdemo: the import never finished, skipped");
+            }
+            return;
+        }
+        let root = S.game_root + "/";
+        check(fs::exists(root + "models/column.glb"), "the model landed in the project");
+        check(fs::exists(root + "scenes/column.toml"), "with a scene written beside it");
+        check(crate::dropin::in_flight(S) == 0, "nothing is in flight once it ends");
+        // Kept in the list rather than dropped: four files are over in two
+        // frames, and a list emptied that fast was never read.
+        let ended = S.jobs.get(DROPPED_MODEL).unwrap_or(#{ over: "gone", done: 0 });
+        check(ended.over == "imported", format!("the list says how it ended ({})", ended.over));
+        check(ended.done == 3, format!("with what it wrote ({})", ended.done));
+        let named = false;
+        for node in S.doc {
+            if node.get("name").unwrap_or("") == "Column" {
+                named = true;
+            }
+        }
+        check(named, "the scene it wrote was instanced");
+        // The engine reads the instanced scene itself, so the mesh inside it
+        // is the one thing the document cannot vouch for.
+        let names = mesh_file(S, "ColumnMesh");
+        check(names.starts_with(S.game_root),
+            format!("the instanced mesh names a file in the game ({})", names));
+        // The instanced node goes before its files do: left standing it names
+        // a model this teardown is about to delete, and the renderer says so
+        // every frame for the rest of the run.
+        shell::undo(S);
+        // Again, stopped before its first slice: cancel is read at the top of
+        // one, so nothing has been written yet and the count is honest.
+        clear_import(S);
+        S.import_demo = 3;
+        crate::dropin::take(S, DROPPED_MODEL);
+        import::cancel();
+        return;
+    }
+    check(import::running() == 0, "a cancelled import lets go of its place");
+    check(crate::dropin::in_flight(S) == 0, "and nothing is in flight");
+    check(!fs::exists(S.game_root + "/models/column.glb"),
+        "and a cancel before the first file wrote none");
+    // Cancelled before it had said it started, so the list is where the line
+    // comes from rather than the report that never arrived.
+    let stopped = S.jobs.get(DROPPED_MODEL).unwrap_or(#{ over: "gone" });
+    check(stopped.over == "stopped", format!("the list says it stopped ({})", stopped.over));
+    clear_import(S);
+    S.import_demo = -1;
+    log::info("selftest jobdemo: done");
+}
+
+pub fn rows_step(S) {
+    let tree = scene::get_node(TREE_NODE);
+    if util::is_nil(tree) {
+        S.rows_demo = -1;
+        log::info("selftest rowsdemo: no shell in this run, skipped");
+        return;
+    }
+    let widget = util::obj(tree.get_component("widget"));
+    let rows = util::vec(widget.get("options").unwrap_or([]));
+    if rows.len() == 0 {
+        S.rows_waited = S.rows_waited + 1;
+        if S.rows_waited > 60 {
+            S.rows_demo = -1;
+            log::info("selftest rowsdemo: the outliner drew no rows this run, skipped");
+        }
+        return;
+    }
+    let stage = S.rows_demo;
+    S.rows_demo = stage + 1;
+    if stage == 0 {
+        rows_drawn(S, widget, rows);
+        rows_menu(widget);
+        rows_picked(S, tree, rows);
+    } else if stage == 1 {
+        rows_answered(S, rows);
+        S.search["tree"] = name_at(S, S.rows_want);
+    } else if stage == 2 {
+        rows_narrowed(S, rows);
+        S.search["tree"] = "zzqq-nothing-matches-this";
+    } else if stage == 3 {
+        check(widget["visible"] == false, "a query matching nothing hides the tree");
+        S.search["tree"] = "";
+    } else if stage == 4 {
+        check(rows.len() == S.doc.len(), "and clearing the query brings every row back");
+        // A second node, to see the set drawn rather than the active node.
+        if S.doc.len() > 1 {
+            selection::toggle(S, if S.sel == 0 { 1 } else { 0 });
+        }
+    } else {
+        S.rows_demo = -1;
+        let lit = util::vec(widget.get("selection").unwrap_or([]));
+        check(lit.len() == selection::count(S) && lit.len() > 1,
+            format!("a second selected node lights a second row ({} lit)", lit.len()));
+        log::info("selftest rowsdemo: done");
+    }
+}
+
+// The menu a right click on a row opens: a node beside the tree, every row of
+// it naming a method the Editor's script declares. A typo in a scene is a row
+// that does nothing, and nothing else says so.
+fn rows_menu(widget) {
+    let named = widget.get("context").unwrap_or("");
+    check(named != "", "the outliner's tree names a context menu");
+    let menu = scene::get_node("Editor/Shell/Body/Left/LeftSheet/" + named);
+    if util::is_nil(menu) {
+        check(false, format!("and the scene holds it ({})", named));
+        return;
+    }
+    let rows = util::vec(menu.children());
+    check(rows.len() > 0, format!("with rows on it ({} of them)", rows.len()));
+    let editor = scene::get_node("Editor");
+    let missing = 0;
+    for row in rows {
+        let handler = util::obj(row.get_component("widget")).get("on_click").unwrap_or("");
+        if handler == "" || !editor.has_method(handler) {
+            missing += 1;
+            log::warn(format!("tree menu row {} calls nothing", row.name));
+        }
+    }
+    check(missing == 0, "and every row calls a method the editor declares");
+}
+
+
+// One row a node, the active one named and every selected one lit.
+fn rows_drawn(S, widget, rows) {
+    check(rows.len() == S.doc.len(),
+        format!("the outliner draws one row a node ({} of {})", rows.len(), S.doc.len()));
+    check(widget["multi"] == true, "its tree holds many rows at once");
+    let lit = util::vec(widget.get("selection").unwrap_or([]));
+    check(lit.len() == selection::count(S),
+        format!("every selected node is lit ({} of {})", lit.len(), selection::count(S)));
+    check(widget["text"] == "",
+        "and the pick channel is clear, so nothing here undoes a selection made elsewhere");
+}
+
+// A row the node reports as picked is the node the document selects. Written
+// onto the node the way a click writes it, so this asks about the read-back
+// rather than about the drawing.
+fn rows_picked(S, tree, rows) {
+    let want = if S.sel == 0 && S.doc.len() > 1 { 1 } else { 0 };
+    S.rows_want = want;
+    tree.patch_component("widget", #{ text: rows[want] });
+}
+
+fn rows_answered(S, rows) {
+    let want = S.rows_want;
+    check(S.sel == want,
+        format!("a picked row selects its node ({} wanted, {} selected)", want, S.sel));
+    check(rows.len() == S.doc.len(), "and the walk is the document's still");
+}
+
+// The search draws on the same node: fewer rows, every one of them a match.
+fn rows_narrowed(S, rows) {
+    let query = S.search["tree"];
+    let want = 0;
+    for node in S.doc {
+        if crate::search::matches(query, format!("{} {}", node.name, model::node_type(node))) {
+            want += 1;
+        }
+    }
+    check(rows.len() == want && want < S.doc.len(),
+        format!("a query narrows the same tree node ({} of {})", rows.len(), S.doc.len()));
+    let named = 0;
+    for row in rows {
+        if row.contains(query) {
+            named += 1;
+        }
+    }
+    check(named == rows.len(), "and every row it leaves is a match");
+}
+
 pub fn librarydemo(S) {
     let root = S.game_root + "/";
     let metal = #{

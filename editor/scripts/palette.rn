@@ -59,7 +59,7 @@ fn commands(S) {
         command("Interface persona", "▤", "⌥5", || shell::set_persona(S, "ui")),
         command(undo_label, "⟲", "⌘Z", || shell::undo(S)),
         command(redo_label, "⟳", "⇧⌘Z", || shell::redo(S)),
-        command("Add child node…", icons::ui("add"), "⇧A", || model::add_child(S, None)),
+        command("Add child node…", icons::ui("add"), "⇧A", || crate::newnode::open(S)),
         command("Attach Rune script to selection", "‹›", "⌥S", || shell::attach_script(S)),
         command("Run scene", "▶", "F5", || shell::toggle_play(S)),
         // One save behind one label: ⌘S writes whichever of the scene, the
@@ -114,6 +114,14 @@ fn commands(S) {
         command("UI scale +", icons::ui("add"), "⌘=", || shell::set_ui_scale(S, S.ui_scale + 0.125)),
         command("UI scale −", "−", "⌘-", || shell::set_ui_scale(S, S.ui_scale - 0.125)),
     ];
+    // The start screen, from inside a project: the same module, so what opens
+    // from here is what opens on a bare launch. A tab has no folder picker and
+    // nowhere to write a template, but it reopens what the browser keeps.
+    if !crate::manager::in_tab() {
+        list.push(command("Open project…", icons::panel("assets"), "", || crate::manager::pick(S)));
+        list.push(command("New project…", icons::ui("add"), "", || crate::manager::open(S)));
+    }
+    list.push(command("Recent projects…", icons::panel("library"), "", || crate::manager::open(S)));
     // One command per scene file, the way the channel views are one per
     // channel: a prefab is placed by name rather than through a picker.
     for rel in model::scene_files(S) {
@@ -177,16 +185,22 @@ pub fn draw(S) {
         return;
     }
     let k = S.theme;
+    let screen = ui::screen_size();
+    // One width, taken from the screen: a phone is narrower than the 560 a
+    // laptop gets, and every column inside is measured off what is left.
+    let width = util::min(560.0, util::max(screen[0] - 32.0, 240.0));
+    let inner = width - 32.0;
+    let row_h = crate::style::row_h(S);
     let scrim_clicked = ui::modal("palette", #{
-        width: 560, top: 0.11, fill: k.panel, stroke: k.line,
+        width: width, top: 0.11, fill: k.panel, stroke: k.line,
         scrim: "#0b0e126b",
     }, || {
         ui::frame(#{ padding_x: 16, padding_y: 12 }, || {
-            ui::horizontal(#{ height: 24 }, || {
+            ui::horizontal(#{ height: row_h }, || {
                 ui::label(icons::ui("search"), #{ size: style::XL, color: k.accent });
                 ui::add_space(4);
                 let (text, _, submitted) = ui::text_field("palette-query", "Nodes, commands, personas…", #{
-                    size: style::XL, width: 440, autofocus: true, color: k.text,
+                    size: style::XL, width: inner - 90.0, autofocus: true, color: k.text,
                 });
                 S.palette_query = text;
                 ui::right(|| {
@@ -198,7 +212,7 @@ pub fn draw(S) {
             });
         });
         ui::separator(k.line);
-        ui::scroll("palette-results", #{ max_height: 326 }, || {
+        ui::scroll("palette-results", #{ max_height: util::max(screen[1] * 0.5, 160.0) }, || {
             ui::spacing(4, 4);
             ui::add_space(8);
             let query = S.palette_query.to_lowercase();
@@ -212,11 +226,11 @@ pub fn draw(S) {
                     matched += 1;
                     let hit = #{ run: false };
                     let highlighted = first;
-                    ui::horizontal(#{ height: 30 }, || {
+                    ui::horizontal(#{ height: util::max(row_h, 30.0) }, || {
                         ui::add_space(8);
                         if ui::pill(cmd.label, #{
-                            height: 30, size: style::MD, align: ui::ALIGN_LEFT,
-                            min_width: 430,
+                            height: util::max(row_h, 30.0), size: style::MD, align: ui::ALIGN_LEFT,
+                            min_width: inner - 100.0,
                             icon: cmd.icon, icon_size: style::LG, icon_color: k.accent,
                             fill: if highlighted { k.sunken } else { "#00000000" },
                             hover_fill: k.sunken,
