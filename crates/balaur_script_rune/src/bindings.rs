@@ -22,6 +22,9 @@ thread_local! {
     static CALLBACKS: RefCell<Vec<(u64, rune::runtime::Function)>> =
         const { RefCell::new(Vec::new()) };
     static NEXT_CALLBACK: Cell<u64> = const { Cell::new(1) };
+    /// Callbacks a binding asked to hold past its call, until released.
+    static KEPT: RefCell<std::collections::BTreeMap<u64, rune::runtime::Function>> =
+        const { RefCell::new(std::collections::BTreeMap::new()) };
     /// Every function and constant declared through the seam, for the API
     /// dump: Rune's context cannot be walked from outside.
     static API: RefCell<Vec<ApiEntry>> = const { RefCell::new(Vec::new()) };
@@ -103,11 +106,25 @@ pub(crate) fn hold_callback(f: rune::runtime::Function) -> CallbackId {
 }
 
 pub(crate) fn lookup_callback(id: CallbackId) -> Option<rune::runtime::Function> {
-    CALLBACKS.with_borrow(|c| {
-        c.iter()
-            .find(|(held, _)| *held == id.0)
-            .and_then(|(_, f)| f.try_clone().ok())
-    })
+    CALLBACKS
+        .with_borrow(|c| {
+            c.iter()
+                .find(|(held, _)| *held == id.0)
+                .and_then(|(_, f)| f.try_clone().ok())
+        })
+        .or_else(|| KEPT.with_borrow(|k| k.get(&id.0).and_then(|f| f.try_clone().ok())))
+}
+
+/// Hold a live callback past the binding call that received it.
+pub(crate) fn keep_callback(id: CallbackId) -> anyhow::Result<()> {
+    let func = lookup_callback(id)
+        .ok_or_else(|| anyhow::anyhow!("callback kept after its call returned"))?;
+    KEPT.with_borrow_mut(|k| k.insert(id.0, func));
+    Ok(())
+}
+
+pub(crate) fn release_callback(id: CallbackId) {
+    KEPT.with_borrow_mut(|k| k.remove(&id.0));
 }
 
 /// Drops every callback registered since it was created.
@@ -289,6 +306,11 @@ pub(crate) fn hold_node_fn(
     })
 }
 
+/// The engine a bound handle was registered with.
+pub(crate) fn engine_of(handle: usize) -> Option<Engine> {
+    BOUND.with_borrow(|b| b.get(handle).map(|(engine, _)| engine.clone()))
+}
+
 /// The handler body shared by every binding and every node method: the
 /// arguments cross into neutral values, the bound Rust runs, and its answer
 /// crosses back. `orphaned` is the panic for a handle this thread never
@@ -314,7 +336,8 @@ pub(crate) fn bound_handler(
         let called = BOUND.with_borrow(|b| b.get(handle).map(|(engine, f)| f(engine, &neutral)));
         let result = match called {
             Some(Ok(v)) => v,
-            Some(Err(err)) => return VmResult::Err(VmError::panic(err.to_string())),
+            // The whole chain: "tween step 0" alone does not say what was wrong.
+            Some(Err(err)) => return VmResult::Err(VmError::panic(format!("{err:#}"))),
             None => return VmResult::Err(VmError::panic(orphaned)),
         };
         match crate::value::from_neutral(&result) {

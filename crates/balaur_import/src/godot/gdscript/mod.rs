@@ -15,11 +15,14 @@ mod shim;
 
 use std::collections::BTreeSet;
 
-pub(crate) use emit::{BASE_SUFFIX, Context, PHYSICS_PROCESS_FLAG, PROCESS_FLAG, RESERVED, safe};
+pub(crate) use emit::{
+    BASE_SUFFIX, Context, PHYSICS_PROCESS_FLAG, PROCESS_FLAG, RESERVED, quoted, safe, typed_zero,
+};
 
 /// Where the shim lands in a converted project, and the local a body binds it
 /// to.
 pub(crate) const SHIM_PATH: &str = "gd.rn";
+pub(crate) use map::BUILTIN_SIGNALS;
 pub(crate) use shim::SHIM;
 
 /// One function's body, translated.
@@ -194,9 +197,31 @@ mod tests {
     }
 
     #[test]
-    fn a_signal_emits_by_name_on_the_node() {
+    fn an_animation_tree_is_driven_through_its_parameters() {
+        let source = "var playback = hull.get(\"parameters/playback\")\n\
+                      playback.travel(&\"run\")\n\
+                      hull[\"parameters/conditions/moving\"] = true\n\
+                      hull.set(\"parameters/conditions/hurt\", false)\n\
+                      var gait = hull[\"parameters/playback\"]\n";
+        let out = translate(source, &ship());
+        for line in [
+            r#"let playback = (gd.get)(this.hull, "parameters/playback", ());"#,
+            r#"(gd.invoke1)(playback, "travel", "run")"#,
+            r#"(gd.set)(this.hull, "parameters/conditions/moving", true);"#,
+            r#"(gd.set)(this.hull, "parameters/conditions/hurt", false)"#,
+            r#"let gait = (gd.get)(this.hull, "parameters/playback", ());"#,
+        ] {
+            assert!(out.contains(line), "{line}\n{out}");
+        }
+    }
+
+    #[test]
+    fn a_signal_calls_its_handlers_and_emits_by_name() {
         let out = translate("sunk.emit(3)\n", &ship());
-        assert!(out.contains(r#"this.node.emit("sunk", 3);"#), "{out}");
+        assert!(
+            out.contains(r#"(gd.emit_now)(this.node, "sunk", [3]);"#),
+            "{out}"
+        );
     }
 
     #[test]
@@ -219,7 +244,10 @@ mod tests {
     #[test]
     fn a_short_circuit_into_a_field_goes_through_a_temporary() {
         let out = translate("var live = true\nhull = live || speed\n", &ship());
-        assert!(out.contains("let tmp1 = live || this.speed;"), "{out}");
+        assert!(
+            out.contains("let tmp1 = live || (gd.truthy)(this.speed);"),
+            "{out}"
+        );
         assert!(out.contains("this.hull = tmp1;"), "{out}");
     }
 

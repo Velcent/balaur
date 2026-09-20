@@ -47,6 +47,7 @@ pub(crate) fn register_widget_component(reg: &mut Registry<'_>) {
                     (k::TEXT_KEY, r#"{ type = "string", default = "", description = "A localization key drawn in place of `text`, re-read every frame so a locale switch shows at once", group = "type" }"#),
                     (k::ON_CLICK, r#"{ type = "string", default = "", description = "Script method called when the widget is clicked, on this node or the nearest ancestor whose script declares it. An `image` that names one senses clicks too, which is how a picture becomes a button", group = "events" }"#),
                     (k::CLICKED, r#"{ type = "bool", default = false, readonly = true, description = "True on the frame the button was clicked", group = "events" }"#),
+                    (k::PASS_NODE, r#"{ type = "bool", default = false, description = "Hand every handler this widget calls its own node as the last argument, so one method can serve many widgets", group = "events" }"#),
                     (k::ON_LINK, r#"{ type = "string", default = "", description = "Script method called with the target of a `[url=target]` span in `markup` text that was clicked, on this node or the nearest ancestor whose script declares it", group = "events" }"#),
                     (k::SUFFIX, r#"{ type = "string", default = "", description = "Units drawn after a `drag_value`'s number, the way `placeholder` is drawn before it", group = "type" }"#),
                     (k::ARROWS, r#"{ type = "bool", default = false, description = "Draw a step up and a step down beside a `drag_value`, each moving it by `step` within `min` and `max`", group = "type" }"#),
@@ -98,7 +99,7 @@ pub(crate) fn register_widget_component(reg: &mut Registry<'_>) {
                     (k::COLOR, r#"{ type = "color", default = [1.0, 1.0, 1.0, 1.0], description = "What a `color` swatch holds; `on_change` hears the new one", group = "paint" }"#),
                     (k::ROW_HEIGHT, r#"{ type = "float", default = 0.0, min = 0.0, description = "The pitch of a `list` or `tree` row, in design pixels; 0 takes the font's own line height", group = "layout" }"#),
                     (k::FONT, &format!(r#"{{ type = "enum", default = "{}", options = [{}], description = "Which of the theme's families the widget draws in", group = "type" }}"#, w::UI, v::options(w::WIDGET_FONTS))),
-                    (k::OPTIONS, r#"{ type = "strings", default = [], description = "The items a `dropdown`, `menu`, `list`, `tree` or `table` holds; `text` is the one picked, except on a `menu` where it is the button caption. A `tree` row starts with one tab per level, a `list` or `tree` row splits on U+001F into icon, label, a trailing note and an `#rrggbb` for that row, and a `table` row splits on the same into one cell a column. `on_change` hears every pick", group = "value" }"#),
+                    (k::OPTIONS, r#"{ type = "strings", default = [], description = "The items a `dropdown`, `menu`, `list`, `tree` or `table` holds; `text` is the one picked, except on a `menu` where it is the button caption. A `tree` row starts with one tab per level, a `list` or `tree` row splits on U+001F into icon, label, a trailing note, an `#rrggbb` for that row and a key that is never drawn, which two rows with the same label need to stay two rows, and a `table` row splits on the same into one cell a column. `on_change` hears every pick", group = "value" }"#),
                     (k::COLUMNS, r#"{ type = "int", default = 0, min = 0, description = "How many children a `grid` puts on each row, and how many cards a `list` flows into; 0 is the kind's own, which is two for a grid and one line a row for a list. A `table`'s columns are its `titles`", group = "layout" }"#),
                     (k::SELECTION, r#"{ type = "strings", default = [], description = "The rows a `list`, `tree` or `table` has picked, one of them where it holds one. `text` is the last row clicked, which is where a shift range measures from; `on_change` hears the whole list where the widget holds many, and the row where it holds one", group = "value" }"#),
                     (k::MULTI, r#"{ type = "bool", default = false, description = "Let a `list`, `tree` or `table` hold more than one row: the platform's command key toggles a row and shift takes the run from the last one clicked", group = "value" }"#),
@@ -265,6 +266,7 @@ fn widget_to_toml(widget: &Widget) -> toml::Value {
         k::ON_CLICK.into(),
         toml::Value::String(widget.on_click.to_string()),
     );
+    map.insert(k::PASS_NODE.into(), toml::Value::Boolean(widget.pass_node));
     reach_to_toml(widget, &mut map);
     map.insert(k::PADDING.into(), four(widget.padding));
     map.insert(k::GAP.into(), toml::Value::Float(f64::from(widget.gap)));
@@ -690,6 +692,7 @@ fn widget_from(params: &toml::Value) -> Widget {
         row_height: f(k::ROW_HEIGHT),
         font: s(k::FONT),
         on_click: s(k::ON_CLICK),
+        pass_node: r.flag(k::PASS_NODE),
         context: s(k::CONTEXT),
         on_link: s(k::ON_LINK),
         selectable: r.flag(k::SELECTABLE),

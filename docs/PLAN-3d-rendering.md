@@ -21,8 +21,9 @@ chromatic aberration, grain, pixelation. `docs/PLAN-shaders.md` owns the
 shader system this builds on, and its phase 9, post-process materials, is
 where four of those passes land. `docs/PLAN-rendering.md` is the 2D half;
 `docs/PLAN-views-and-culling.md` owns the camera's projection, cull masks
-and MSAA; `docs/PLAN-textures.md` owns how an image is imported, which is
-where a normal map's sRGB flag lives.
+and MSAA; a texture's sidecar says how an image is imported, which is
+where a normal map's `normal_map` and sRGB flags live
+(`docs/generated/assets.md#import-settings`).
 
 ## 0. Where the tree is today
 
@@ -35,7 +36,7 @@ Built, and not built for this:
 | A physically based surface over the frame's lights: GGX, Smith, Schlick, with a normal map over a tangent frame solved from screen-space derivatives, so a mirrored UV shell lights as its twin does | `shaders/pbr.wesl`, mounted as `package::pbr`, `mesh::tangent_frame` |
 | Six texture slots on group 2, each with the fork's one-pixel neutral | `material::TEXTURE_SLOTS`, `Param::Texture` |
 | `shadows` and `layers` on `mesh` and `shape3d` | `Renderable3d`, `lighting_from_params` |
-| A 3D material contract with sixteen lights of three kinds, ambient and fog in its frame uniforms | `shaders/mesh.wesl`, `shader_material_3d.rs` (`MAX_LIGHTS`) |
+| A 3D material contract with sixteen lights of three kinds, ambient and fog in its frame uniforms | `shaders/mesh.wesl`, `shaders.rs` (`MAX_LIGHTS`) |
 | `camera.post` flags applied to the fork's passes: bloom, SSAO, SSR, depth of field | `kiss3d_backend.rs::apply_post`, `window.set_bloom_enabled` and friends |
 | Image-based lighting, screen occlusion, reflection probes and the refraction background, bound for every 3D material | `frame_group.rs`, group 0 of `shaders/mesh.wesl` |
 | A geometry prepass every 3D material draws, so occlusion and depth of field measure it | `shaders/prepass.wesl`, `pipeline::prepass_pipeline` |
@@ -58,7 +59,8 @@ Missing:
   lets a material declare one. See question 6.
 - **The clustered light buffers.** `MAX_LIGHTS` is sixteen and the frame group
   binds no storage buffers; a scene with more lights lights with the first
-  sixteen.
+  sixteen. Step 9 makes the sixteen a project's own number; clustering is what
+  would let it stop being a number at all.
 - **Screen-space reflections off a Balaur material.** The prepass writes
   geometry, and writes a neutral roughness for it: the pass reads a material's
   surface as diffuse. Occlusion, depth of field and the depth glass tests
@@ -221,7 +223,21 @@ the module.
    bringing its own knobs, over the same physically based surface. It ships in
    the library rather than the engine because a project copies it and edits
    it. Not built: the inspector folds that would group a layer's knobs.
-9. **Decals and volumetrics.** A `decal` component projecting onto the depth
+9. **Limits a project sets.** `MAX_LIGHTS`, `MAX_PROBES` and `MAX_JOINTS`
+   live in `shaders.rs` and reach a shader as the `constants` module, so the
+   numbers a `project.toml` names would reach WESL with nothing new in
+   between. The Rust half is what holds: `frame_group.rs` declares
+   `lights: [GpuLight; MAX_LIGHTS]` and `probes: [GpuProbe; MAX_PROBES]` in a
+   `Pod` struct whose size the compiler fixes, and `skinned_2d.rs` and
+   `skinned_3d.rs` do the same for the joint palette. The layout is already
+   free of it: `bind_layout::uniform_entry` passes `min_binding_size: None`.
+   Read `[render] max_lights`, `max_probes` and `max_joints` into a resource
+   at boot, write the frame uniform as bytes whose length is the limit times
+   the row, hand the same numbers to `shaders::link`, and refuse one the
+   adapter's `max_uniform_buffer_binding_size` cannot hold, naming its figure.
+   A game that wants sixty-four lights then pays for sixty-four and one that
+   wants four pays for four, at one relink per run.
+10. **Decals and volumetrics.** A `decal` component projecting onto the depth
    buffer, and a froxel march for fog a light shafts through. Both are new
    passes rather than fork features, and both want step 1's shadow atlas.
 

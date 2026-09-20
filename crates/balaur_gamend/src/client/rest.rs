@@ -36,7 +36,7 @@ pub struct Client {
 }
 
 impl Client {
-    /// `base_url` is the server root, e.g. `http://localhost:4000` — paths
+    /// `base_url` is the server root, e.g. `https://gamend.org` — paths
     /// are appended verbatim.
     pub fn new(base_url: &str) -> Self {
         Self {
@@ -91,16 +91,25 @@ impl Client {
 
     /// One authenticated API call. On a 401 with a refresh token in hand, the
     /// session is refreshed once and the call retried, so an expired access
-    /// token heals invisibly.
+    /// token heals invisibly. A refused refresh answers the 401 itself.
     #[cfg(not(target_family = "wasm"))]
     pub fn call(&mut self, method: &str, path: &str, body: Option<&Value>) -> Result<Reply> {
         let reply = self.call_raw(method, path, body, true)?;
         if reply.status != 401 || self.refresh_token().is_empty() {
             return Ok(reply);
         }
+        if self.renew().is_err() {
+            return Ok(reply);
+        }
+        self.call_raw(method, path, body, true)
+    }
+
+    /// Trade the refresh token for a new session, kept for the calls after.
+    #[cfg(not(target_family = "wasm"))]
+    pub fn renew(&mut self) -> Result<()> {
         let session = super::auth::refresh(self, &self.refresh_token())?;
         self.session = Some(session);
-        self.call_raw(method, path, body, true)
+        Ok(())
     }
 
     /// The call itself, no refresh logic.
@@ -114,16 +123,28 @@ impl Client {
     ) -> Result<Reply> {
         let prepared = self.prepare(method, path, body, authenticated);
         let mut response = match prepared.method.as_str() {
-            "GET" | "DELETE" => {
-                let mut r = if prepared.method == "GET" {
-                    self.agent.get(&prepared.url)
-                } else {
-                    self.agent.delete(&prepared.url)
-                };
+            "GET" => {
+                let mut r = self.agent.get(&prepared.url);
                 if let Some(token) = &prepared.bearer {
                     r = r.header("authorization", token);
                 }
-                r.call()?
+                r.header(super::RUN_HEADER, super::run_id()).call()?
+            }
+            // A body only when given one: deleting an account that has a
+            // password sends its `current_password`.
+            "DELETE" => {
+                let mut r = self.agent.delete(&prepared.url);
+                if let Some(token) = &prepared.bearer {
+                    r = r.header("authorization", token);
+                }
+                let r = r.header(super::RUN_HEADER, super::run_id());
+                match prepared.body.as_deref() {
+                    Some(body) => r
+                        .force_send_body()
+                        .header("content-type", "application/json")
+                        .send(body)?,
+                    None => r.call()?,
+                }
             }
             "POST" | "PUT" | "PATCH" => {
                 let mut r = match prepared.method.as_str() {
@@ -134,7 +155,8 @@ impl Client {
                 if let Some(token) = &prepared.bearer {
                     r = r.header("authorization", token);
                 }
-                r.header("content-type", "application/json")
+                r.header(super::RUN_HEADER, super::run_id())
+                    .header("content-type", "application/json")
                     .send(prepared.body.as_deref().unwrap_or("{}"))?
             }
             other => anyhow::bail!("unsupported method `{other}`"),

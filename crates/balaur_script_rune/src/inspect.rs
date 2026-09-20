@@ -123,7 +123,7 @@ pub(crate) fn public_functions(source: &str) -> Vec<PublicSignature> {
 /// A signature broken over two lines used to be invisible here, which took
 /// the function out of `script::require`, out of the editor's hooks list, and
 /// out of the list a plugin's `register` is looked for in.
-fn parameters(lines: &[&str], at: usize, first: &str) -> Option<String> {
+pub(crate) fn parameters(lines: &[&str], at: usize, first: &str) -> Option<String> {
     let mut gathered = String::from(first);
     let mut scan = at;
     while !gathered.contains(')') {
@@ -445,12 +445,20 @@ impl RuneHost {
     /// against the unit's sources is what turns "field not found" into a file,
     /// a line and the frames that led there.
     pub(crate) fn report(&self, key: &str, label: &str, err: &rune::runtime::VmError) {
-        let sources = self
-            .state
-            .borrow()
-            .scripts
-            .get(key)
-            .and_then(|s| s.sources.clone());
+        // An error thrown in a unit another script required renders against
+        // that unit's sources: its line numbers mean nothing in the caller's.
+        let thrown = err.first_location().map(|at| at.unit.clone());
+        let sources = {
+            let state = self.state.borrow();
+            let owner = thrown.and_then(|unit| {
+                state
+                    .scripts
+                    .values()
+                    .find(|s| std::sync::Arc::ptr_eq(&s.unit, &unit))
+                    .and_then(|s| s.sources.clone())
+            });
+            owner.or_else(|| state.scripts.get(key).and_then(|s| s.sources.clone()))
+        };
         // A packed script has no sources; there is nothing to render against.
         let Some(sources) = sources else {
             tracing::error!("[{key}] {label}: {err}");

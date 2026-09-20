@@ -304,7 +304,7 @@ fn a_polyline_is_a_shape2d_that_keeps_its_reference() {
         let r = world.get::<&Renderable2d>(e).expect("no Renderable2d");
         assert!(matches!(
             r.shape,
-            balaur_render::Shape2d::Polyline { closed: true, .. }
+            balaur_render::Shape2d::Polyline(stroke) if stroke.closed
         ));
         assert_eq!(r.polyline.as_deref(), Some("outline"));
     }
@@ -315,6 +315,47 @@ fn a_polyline_is_a_shape2d_that_keeps_its_reference() {
         Some("outline"),
         "the reference has to survive the round trip, or a save loses the points"
     );
+}
+
+/// Every join and cap, and the miter limit and taper, come back out as they
+/// went in, so a save keeps the look.
+#[test]
+fn a_polyline_s_stroke_survives_the_round_trip() {
+    use balaur_core::stroke::{CAPS, JOINS};
+    let app = app();
+    let pairs = JOINS
+        .iter()
+        .flat_map(|join| CAPS.iter().map(move |cap| (join, cap)));
+    for (join, cap) in pairs {
+        let e = node(&app);
+        let params: toml::Value = toml::from_str(&format!(
+            "kind = \"polyline\"\nmesh = \"outline\"\njoin = \"{join}\"\ncap = \"{cap}\"\nmiter_limit = 2.5\ntaper = [1.0, 0.25]\nsegments = 12\ngradient = [1.0, 0.0, 0.0, 1.0]\ngradient_steps = 7"
+        ))
+        .unwrap();
+        components::add(&app.engine, e, "shape2d", Some(&params)).unwrap();
+        let back = components::get(&app.engine, e, "shape2d").expect("nothing read back");
+        let text = |key: &str| {
+            back.get(key)
+                .and_then(toml::Value::as_str)
+                .map(str::to_owned)
+        };
+        assert_eq!(text("join").as_deref(), Some(*join));
+        assert_eq!(text("cap").as_deref(), Some(*cap));
+        assert_eq!(
+            back.get("miter_limit").and_then(toml::Value::as_float),
+            Some(2.5)
+        );
+        let taper: Vec<f64> = back["taper"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(toml::Value::as_float)
+            .collect();
+        assert_eq!(taper, vec![1.0, 0.25]);
+        let whole = |key: &str| back.get(key).and_then(toml::Value::as_integer);
+        assert_eq!(whole("segments"), Some(12));
+        assert_eq!(whole("gradient_steps"), Some(7));
+    }
 }
 
 /// An unknown kind names itself rather than silently drawing a cuboid.

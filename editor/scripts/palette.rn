@@ -74,6 +74,7 @@ fn commands(S) {
         }),
         // No chord: ⌥3 is the Animate persona's, and one chord names one verb.
         command("Open animation timeline", "◷", "", || crate::docks::show(S, "timeline")),
+        command("Open state machine", "◷", "", || crate::docks::show(S, "statemachine")),
         command("Open the cost dock", icons::panel("cost"), "", || crate::docks::show(S, "cost")),
         command("Open the library", icons::ui("library"), "", || crate::docks::show(S, "library")),
         command("Show event bindings", icons::ui("events"), "", || shell::open_doc(S, "events")),
@@ -119,9 +120,9 @@ fn commands(S) {
     // nowhere to write a template, but it reopens what the browser keeps.
     if !crate::manager::in_tab() {
         list.push(command("Open project…", icons::panel("assets"), "", || crate::manager::pick(S)));
-        list.push(command("New project…", icons::ui("add"), "", || crate::manager::open(S)));
+        list.push(command("New project…", icons::ui("add"), "", || crate::manager::open_over(S)));
     }
-    list.push(command("Recent projects…", icons::panel("library"), "", || crate::manager::open(S)));
+    list.push(command("Recent projects…", icons::panel("library"), "", || crate::manager::open_over(S)));
     // One command per scene file, the way the channel views are one per
     // channel: a prefab is placed by name rather than through a picker.
     for rel in model::scene_files(S) {

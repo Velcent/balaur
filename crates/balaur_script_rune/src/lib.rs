@@ -14,9 +14,12 @@
 
 mod api;
 mod bindings;
+mod context;
 mod debugger;
 mod handles;
+mod holds;
 mod inspect;
+mod mounts;
 mod packed;
 mod pause;
 mod profile;
@@ -52,9 +55,7 @@ pub use inspect::Finding;
 use inspect::{public_functions, render};
 use packed::PackSourceLoader;
 pub use profile::ScriptCost;
-use script_module::script_module;
 use shared::{SHARED_FNS, trampoline};
-use task::WaitFuture;
 pub use tooling::{Completion, Hover, Kind, Location, Symbol, offset_of};
 pub use value::{Color, Node, Vec2, Vec3};
 
@@ -182,9 +183,16 @@ struct State {
     pack: Option<Pack>,
     /// Registered by plugins at startup, folded into the context on first use.
     pending: Rc<RefCell<Vec<rune::Module>>>,
-    /// Built once. Compiling needs the full context; running needs only the
-    /// runtime half.
+    /// The plugins' modules once folded in, kept for a context built again.
+    kept: Vec<rune::Module>,
+    /// Built on first use and again when the mounted addons change.
+    /// Compiling needs the full context; running needs only the runtime half.
     context: Option<(Rc<rune::Context>, Arc<RuntimeContext>)>,
+    /// The addons the context mounts, and the roots they were found under.
+    mounts: Vec<mounts::Mount>,
+    mount_roots: Vec<PathBuf>,
+    /// A saved addon file may have changed what its mount exposes.
+    recheck_mounts: bool,
     scripts: FxHashMap<String, Script>,
     /// `script::require` results: an object of the script's public functions
     /// per key. The object's contents swap in place on hot reload, so every
@@ -202,6 +210,10 @@ struct State {
     _watcher: Option<RecommendedWatcher>,
     breakpoints: FxHashMap<String, Breakpoints>,
     paused: Option<Paused>,
+    /// How many scene builds are attaching scripts, and the `init` calls they
+    /// hold until the outermost has attached everything.
+    init_hold: usize,
+    held_inits: Vec<(Entity, String)>,
 }
 
 #[derive(Clone)]
@@ -243,7 +255,11 @@ impl RuneHost {
                 project_root,
                 pack,
                 pending: Rc::new(RefCell::new(Vec::new())),
+                kept: Vec::new(),
                 context: None,
+                mounts: Vec::new(),
+                mount_roots: Vec::new(),
+                recheck_mounts: false,
                 scripts: FxHashMap::default(),
                 modules: HashMap::new(),
                 module_slots: HashMap::new(),
@@ -253,44 +269,14 @@ impl RuneHost {
                 _watcher: watcher,
                 breakpoints: FxHashMap::default(),
                 paused: None,
+                init_hold: 0,
+                held_inits: Vec::new(),
             })),
         })
     }
 
     pub fn engine(&self) -> Engine {
         self.engine.clone()
-    }
-
-    /// Fold every registered module into a context.
-    ///
-    /// Deferred to first use because Rune builds a context once, and plugins
-    /// are still registering bindings while the app is being assembled.
-    fn context(&self) -> Result<(Rc<rune::Context>, Arc<RuntimeContext>)> {
-        if let Some(built) = &self.state.borrow().context {
-            return Ok(built.clone());
-        }
-        let mut ctx = rune::Context::with_default_modules()?;
-        let mut values = rune::Module::with_crate("balaur")?;
-        value::install(&mut values, &self.engine)?;
-        ctx.install(values)?;
-        // `task::wait(token).await` parks until the engine wakes the token.
-        // `init` and handlers may be async; `update` is deliberately synchronous.
-        let mut task = rune::Module::with_crate("task")?;
-        task.function("wait", |token: i64| WaitFuture {
-            token: u64::try_from(token).unwrap_or(u64::MAX),
-        })
-        .build()?;
-        task::declare_waits(self, &mut task)?;
-        ctx.install(task)?;
-        ctx.install(script_module(self)?)?;
-        let pending = self.state.borrow().pending.clone();
-        for m in pending.borrow_mut().drain(..) {
-            ctx.install(m)?;
-        }
-        let runtime = Arc::new(ctx.runtime()?);
-        let built = (Rc::new(ctx), runtime);
-        self.state.borrow_mut().context = Some(built.clone());
-        Ok(built)
     }
 
     fn normalize_key(path: &str) -> String {
@@ -606,6 +592,13 @@ impl RuneHost {
         if self.resolve(&key, "fixed_update").is_some() {
             balaur_core::interpolate::enable(&self.engine, entity);
         }
+        {
+            let mut held = self.state.borrow_mut();
+            if held.init_hold > 0 {
+                held.held_inits.push((entity, key));
+                return Ok(());
+            }
+        }
         self.invoke(entity, &key, "init", (state,), true, None);
         Ok(())
     }
@@ -813,7 +806,7 @@ impl RuneHost {
     /// `script::require`: an object of `key`'s public functions, cached so
     /// every requirer holds the same object.
     pub fn require_module(&self, path: &str) -> Result<rune::Value> {
-        let key = Self::normalize_key(path);
+        let key = self.required_key(path);
         let cached = self
             .state
             .borrow()
@@ -830,6 +823,23 @@ impl RuneHost {
             .modules
             .insert(key, value.try_clone()?);
         Ok(value)
+    }
+
+    /// The key a `script::require` names. A relative path found under a root
+    /// the host added reads from there first: `balaur edit` runs with the
+    /// editor as the project root, and the game it plays requires its own.
+    fn required_key(&self, path: &str) -> String {
+        let key = Self::normalize_key(path);
+        if balaur_core::files::rooted(Path::new(&key)) {
+            return key;
+        }
+        let files = balaur_core::files::backend(&self.engine);
+        balaur_core::file_api::project_roots(&self.engine)
+            .into_iter()
+            .skip(1)
+            .map(|root| root.join(&key))
+            .find(|full| files.exists(full))
+            .map_or(key, |full| full.to_string_lossy().replace('\\', "/"))
     }
 
     /// Build the export object for one script: its `pub fn`s by name, each
@@ -857,6 +867,14 @@ impl RuneHost {
             let Some(function) = self.method(key, &declared.name) else {
                 continue;
             };
+            let name = rune::alloc::String::try_from(declared.name.as_str())?;
+            // Past the five parameters a native trampoline takes, the function
+            // itself: callable from any unit, though a reload reaches it only
+            // through the module and not through a copy a caller kept.
+            if declared.arity > crate::shared::MOST_ARGS {
+                object.insert(name, rune::to_value(function)?)?;
+                continue;
+            }
             let slot = SHARED_FNS.with(|shared| {
                 let mut shared = shared.borrow_mut();
                 if let Some(slot) = spare.pop() {
@@ -867,19 +885,13 @@ impl RuneHost {
                     shared.len() - 1
                 }
             });
-            let Some(wrapper) = trampoline(slot, declared.arity) else {
+            let label = format!("{key}: {}", declared.name);
+            let Some(wrapper) = trampoline(slot, declared.arity, &label) else {
                 spare.push(slot);
-                tracing::warn!(
-                    "{key}: `{}` takes too many parameters to require",
-                    declared.name
-                );
                 continue;
             };
             held.push(slot);
-            object.insert(
-                rune::alloc::String::try_from(declared.name.as_str())?,
-                rune::to_value(wrapper)?,
-            )?;
+            object.insert(name, rune::to_value(wrapper)?)?;
         }
         if let Some(constants) = self.method(key, inspect::CONSTANTS_FN) {
             let table = constants.call::<rune::runtime::Object>(()).into_result()?;
@@ -1033,6 +1045,26 @@ impl balaur_script::ScriptHost<Engine> for RuneHost {
         key.is_some_and(|key| self.resolve(&key, method).is_some())
     }
 
+    fn hold_inits(&self) {
+        RuneHost::hold_inits(self);
+    }
+
+    fn release_inits(&self) {
+        RuneHost::release_inits(self);
+    }
+
+    fn script_field(
+        &self,
+        node: balaur_script::NodeId,
+        name: &str,
+    ) -> Option<balaur_script::Value> {
+        let entity = balaur_core::entity_of(node).ok()?;
+        let state = self.state.borrow();
+        let instance = state.instances.get(&entity)?;
+        let object = instance.state.borrow_ref::<rune::runtime::Object>().ok()?;
+        value::to_neutral(object.get(name)?).ok()
+    }
+
     fn call_all(&self, method: &str) {
         RuneHost::call_all(self, method);
     }
@@ -1078,6 +1110,14 @@ impl balaur_script::ScriptHost<Engine> for RuneHost {
         let args: Result<Vec<rune::Value>> = args.iter().map(value::from_neutral).collect();
         let out = func.call::<rune::Value>(args?).into_result()?;
         value::to_neutral(&out)
+    }
+
+    fn keep(&self, callback: balaur_script::CallbackId) -> Result<()> {
+        bindings::keep_callback(callback)
+    }
+
+    fn release(&self, callback: balaur_script::CallbackId) {
+        bindings::release_callback(callback);
     }
 
     fn call_in(

@@ -68,6 +68,7 @@ modules! {
     audio = "audio" => balaur_audio::AudioPlugin,
     gamend = "gamend" => balaur_gamend::GamendPlugin,
     http = "http" => balaur_http::HttpPlugin,
+    multiplayer = "multiplayer" => balaur_multiplayer::MultiplayerPlugin,
     web = "web" => balaur_web::WebPlugin,
     websocket = "websocket" => balaur_websocket::WebsocketPlugin,
 }
@@ -222,6 +223,12 @@ pub fn standard_app(mut config: AppConfig) -> Result<App> {
         .clone()
         .unwrap_or_else(|| config.project_root.join(standalone::EXTENSIONS_DIR));
     let mut app = App::new(config)?;
+    balaur_core::settings::define_group(
+        &app.engine,
+        "log",
+        balaur_core::settings::Scope::Project,
+        &balaur_core::ComponentDef::parse_schema("settings.log", LOG_SCHEMA),
+    );
     app.engine.insert_resource(configs_from(&asked));
     balaur_plugin::load_all(&mut app, &mut standard_plugins(&asked)?)?;
     drive_ui_focus(&mut app);
@@ -400,16 +407,47 @@ struct LoadedExtensions(
 /// `window` feature is enabled, the headless fixed-rate loop otherwise.
 #[allow(unused_mut)] // `mut` is only needed by the headless fallback path.
 pub fn run(mut app: App, title: &str) -> Result<()> {
+    keep_log(&app);
     #[cfg(feature = "window")]
     {
-        return balaur_render::kiss3d_backend::run_windowed(app, title);
+        let ran = balaur_render::kiss3d_backend::run_windowed(app, title);
+        balaur_core::logbuf::flush_file();
+        return ran;
     }
     #[allow(unreachable_code)] // The windowed path above returns when the feature is on.
     {
         let _ = title;
         app.run();
         balaur_render::warn_if_unserved(&app.engine);
+        balaur_core::logbuf::flush_file();
         Ok(())
+    }
+}
+
+/// The project's `[log]` table: whether a run keeps a log file, and how many.
+const LOG_SCHEMA: &str = r#"
+file = { type = "bool", default = true, order = 1, help = "Write each run's log to logs/run.log in the user data directory, so a crash leaves its last lines behind." }
+keep = { type = "int", default = 5, min = 0, max = 50, order = 2, help = "How many earlier runs' logs stay beside it, as run.1.log and on." }
+"#;
+
+/// Start this run's log file, unless `[log] file` is off. Only a real run
+/// opens one: a test boots apps without passing through here. [`run`] calls
+/// it; a loop of its own, like the CLI's headless one, calls it first and
+/// `logbuf::flush_file` after it, for the lines logged past the last frame.
+pub fn keep_log(app: &App) {
+    let eng = &app.engine;
+    let setting = |key: &str| balaur_core::settings::get(eng, &format!("log/{key}"));
+    if !setting("file").and_then(|v| v.as_bool()).unwrap_or(true) {
+        return;
+    }
+    let keep = setting("keep")
+        .and_then(|v| v.as_integer())
+        .and_then(|n| usize::try_from(n).ok())
+        .unwrap_or(5);
+    let dir = balaur_core::engine_api::user_data_dir_of(eng).join("logs");
+    match balaur_core::logbuf::open_file(&dir, "run", keep) {
+        Ok(path) => tracing::info!(path = %path.display(), "this run's log"),
+        Err(why) => tracing::warn!("no log file: {why:#}"),
     }
 }
 
@@ -425,9 +463,12 @@ pub fn run(mut app: App, title: &str) -> Result<()> {
 /// adapter is available.
 #[allow(unused_variables, unused_mut)] // Both are used only by the windowed build.
 pub fn run_offscreen(mut app: App, title: &str, width: u32, height: u32) -> Result<()> {
+    keep_log(&app);
     #[cfg(feature = "window")]
     {
-        return balaur_render::kiss3d_backend::run_offscreen(app, title, width, height);
+        let ran = balaur_render::kiss3d_backend::run_offscreen(app, title, width, height);
+        balaur_core::logbuf::flush_file();
+        return ran;
     }
     #[allow(unreachable_code)] // The windowed path above returns when the feature is on.
     {
@@ -456,10 +497,13 @@ pub async fn boot_pack_on_canvas(bytes: &[u8], canvas_id: &str) -> Result<()> {
     let pack = Pack::decode(bytes)?;
     let mut app = standard_app(AppConfig::packed(pack))?;
     app.load_project()?;
+    keep_log(&app);
     let title = app
         .manifest()
         .map_or_else(|| "balaur".to_string(), |m| m.name.clone());
-    balaur_render::kiss3d_backend::run_windowed_async(app, &title, Some(canvas_id)).await
+    let ran = balaur_render::kiss3d_backend::run_windowed_async(app, &title, Some(canvas_id)).await;
+    balaur_core::logbuf::flush_file();
+    ran
 }
 
 /// The editor, booted on an HTML canvas over a project that is already in

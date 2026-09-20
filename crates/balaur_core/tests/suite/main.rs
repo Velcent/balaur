@@ -40,6 +40,7 @@ mod settings;
 mod skeleton;
 mod snapshot;
 mod standalone;
+mod star;
 mod strings;
 mod task;
 mod timings;

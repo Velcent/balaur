@@ -23,6 +23,8 @@ const CAPACITY: usize = 500;
 
 #[derive(Clone, Debug)]
 pub struct LogEntry {
+    /// Its place in everything captured, from 1: a reader resumes after one.
+    pub seq: u64,
     /// Seconds since the subscriber was installed.
     pub time: f64,
     /// "info", "warn", "error", "debug", "trace".
@@ -111,16 +113,22 @@ impl<S: Subscriber> Layer<S> for CaptureLayer {
             }
             let time = buffer.start.elapsed().as_secs_f64();
             buffer.total += 1;
-            buffer.entries.push_back(LogEntry {
+            let entry = LogEntry {
+                seq: buffer.total,
                 time,
                 level: meta.level().as_str().to_lowercase(),
                 tag,
                 message: visitor.message,
                 fields: visitor.fields,
-            });
+            };
+            file::append(&entry);
+            buffer.entries.push_back(entry);
         }
     }
 }
+
+/// Where gilrs times its force-feedback loop, held to errors.
+const QUIET_RUMBLE: &str = "gilrs::ff::server=error";
 
 /// Start capturing: stderr output plus the ring buffer, and a bridge so `log`
 /// records from dependencies land in the same place.
@@ -132,7 +140,10 @@ pub fn capture(max_level: LevelFilter) {
     let _ = tracing_log::LogTracer::init();
     let filter = EnvFilter::builder()
         .with_default_directive(max_level.into())
-        .from_env_lossy();
+        .from_env_lossy()
+        // gilrs times its rumble thread and warns whenever the machine is busy:
+        // a note about load, not about the game, and a warning fails a test run.
+        .add_directive(QUIET_RUMBLE.parse().expect("a fixed directive"));
     #[cfg(not(target_arch = "wasm32"))]
     let fmt = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
     // A browser has no stderr and no clock for the timestamp column —
@@ -224,6 +235,26 @@ pub fn recent(n: usize) -> Vec<LogEntry> {
     })
 }
 
+/// What was captured after `cursor`, oldest first, the cursor to pass next,
+/// and how many the ring dropped before they could be read.
+///
+/// `cursor` is a `seq`; 0 reads everything the ring still holds.
+pub fn since(cursor: u64) -> (Vec<LogEntry>, u64, u64) {
+    let guard = lock_buffer();
+    let Some(buffer) = guard.as_ref() else {
+        return (Vec::new(), cursor, 0);
+    };
+    let entries: Vec<LogEntry> = buffer
+        .entries
+        .iter()
+        .filter(|entry| entry.seq > cursor)
+        .cloned()
+        .collect();
+    let first = entries.first().map_or(buffer.total + 1, |entry| entry.seq);
+    let missed = first.saturating_sub(cursor + 1);
+    (entries, buffer.total, missed)
+}
+
 /// How many entries have been captured since `capture`, evicted ones
 /// included: a reader compares two values to learn whether anything is new.
 pub fn total() -> u64 {
@@ -248,4 +279,153 @@ pub fn first_time(site: &'static str, key: &str) -> bool {
         let keys = said.entry(site).or_default();
         !keys.contains(key) && keys.insert(key.to_owned())
     })
+}
+
+pub use file::{close as close_file, flush as flush_file, open as open_file, path as file_path};
+
+/// The same stream kept in a file, so the run that crashed leaves its lines
+/// behind. Written through the `files` backend: the disk natively, the page's
+/// storage in a browser.
+mod file {
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+    use std::thread::ThreadId;
+
+    use super::LogEntry;
+    use crate::files::FileBackend;
+
+    struct Sink {
+        path: PathBuf,
+        /// The thread that opened the file: its backend is the one written to.
+        owner: ThreadId,
+        /// Lines captured on any thread since the last write.
+        waiting: String,
+    }
+
+    static SINK: Mutex<Option<Sink>> = Mutex::new(None);
+
+    fn lock() -> std::sync::MutexGuard<'static, Option<Sink>> {
+        SINK.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Where the file is, once one is open.
+    pub fn path() -> Option<PathBuf> {
+        lock().as_ref().map(|sink| sink.path.clone())
+    }
+
+    /// Start writing `<dir>/<name>.log`, keeping the last `keep` runs as
+    /// `<name>.1.log` and so on, and write a panic there before it unwinds.
+    /// The thread that calls this writes the file, through its default
+    /// backend, each time it calls [`flush`].
+    ///
+    /// # Errors
+    /// When the directory or the file cannot be made.
+    pub fn open(dir: &Path, name: &str, keep: usize) -> anyhow::Result<PathBuf> {
+        flush();
+        let fs = crate::files::default_backend();
+        fs.mkdir(dir)?;
+        let path = dir.join(format!("{name}.log"));
+        rotate(&*fs, dir, name, keep);
+        // What was logged before the file opened, `init` included, goes first.
+        let mut first = String::new();
+        for entry in &super::since(0).0 {
+            push_line(&mut first, entry);
+        }
+        fs.write(&path, first.as_bytes())?;
+        let had = lock().replace(Sink {
+            path: path.clone(),
+            owner: std::thread::current().id(),
+            waiting: String::new(),
+        });
+        if had.is_none() {
+            let previous = std::panic::take_hook();
+            std::panic::set_hook(Box::new(move |info| {
+                previous(info);
+                keep_panic(&format!("panic {info}\n"));
+            }));
+        }
+        Ok(path)
+    }
+
+    /// Write the lines waiting since the last call, in one append. The engine
+    /// calls it once a frame; on a thread other than the opener's it does
+    /// nothing, and the lines wait for that thread.
+    pub fn flush() {
+        let (path, text) = {
+            let mut guard = lock();
+            let Some(sink) = guard.as_mut() else {
+                return;
+            };
+            if sink.waiting.is_empty() || sink.owner != std::thread::current().id() {
+                return;
+            }
+            (sink.path.clone(), std::mem::take(&mut sink.waiting))
+        };
+        // Unlocked first: a backend that logs lands back in `append`.
+        let _ = crate::files::default_backend().append(&path, text.as_bytes());
+    }
+
+    /// Write what is waiting and stop keeping the file.
+    pub fn close() {
+        flush();
+        *lock() = None;
+    }
+
+    /// The panic's line and whatever was waiting, written and synced at once:
+    /// a browser stops the module as soon as the hook returns.
+    fn keep_panic(line: &str) {
+        let (path, text) = {
+            let mut guard = lock();
+            let Some(sink) = guard.as_mut() else {
+                return;
+            };
+            let mut text = std::mem::take(&mut sink.waiting);
+            text.push_str(line);
+            (sink.path.clone(), text)
+        };
+        let fs = crate::files::default_backend();
+        let _ = fs.append(&path, text.as_bytes());
+        fs.sync(&path);
+    }
+
+    /// `<name>.log` becomes `<name>.1.log`, and so on, the oldest dropped.
+    fn rotate(fs: &dyn FileBackend, dir: &Path, name: &str, keep: usize) {
+        let at = |n: usize| {
+            if n == 0 {
+                dir.join(format!("{name}.log"))
+            } else {
+                dir.join(format!("{name}.{n}.log"))
+            }
+        };
+        if keep == 0 {
+            return;
+        }
+        let _ = fs.remove(&at(keep));
+        for n in (0..keep).rev() {
+            if fs.exists(&at(n)) {
+                let _ = fs.rename(&at(n), &at(n + 1));
+            }
+        }
+    }
+
+    /// One line per entry: elapsed seconds, level, tag, message, fields.
+    fn push_line(out: &mut String, entry: &LogEntry) {
+        use std::fmt::Write as _;
+        let _ = write!(
+            out,
+            "{:10.3} {:5} {}: {}",
+            entry.time, entry.level, entry.tag, entry.message
+        );
+        for (name, value) in &entry.fields {
+            let _ = write!(out, " {name}={value}");
+        }
+        out.push('\n');
+    }
+
+    pub(super) fn append(entry: &LogEntry) {
+        if let Some(sink) = lock().as_mut() {
+            push_line(&mut sink.waiting, entry);
+        }
+    }
 }

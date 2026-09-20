@@ -7,6 +7,8 @@
 //! and on any node edited inside one, lands in `overrides` under the path
 //! from the prefab's root.
 
+use balaur::animation::keys as ak;
+use balaur::animation::machine::COMPONENT as MACHINE_COMPONENT;
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -130,7 +132,7 @@ pub(crate) fn convert(
             Some("AnimationPlayer") => walk.player(section, stem, &mut files),
             Some("AnimationTree") => {
                 walk.player(section, stem, &mut files);
-                walk.machine(section, stem, &mut files);
+                walk.machine(document, section, stem, &mut files);
             }
             _ => {}
         }
@@ -503,11 +505,19 @@ impl Walk<'_> {
             && upward
             && let Some(handler) = handler
         {
+            // Godot's CONNECT_APPEND_SOURCE_OBJECT hands the handler its emitter.
+            let append_source = section
+                .attr("flags")
+                .and_then(crate::godot::Value::as_i64)
+                .is_some_and(|flags| flags & 16 != 0);
             if let Some(Toml::Table(widget)) = self.table(&from).map(|t| {
                 t.entry("widget")
                     .or_insert_with(|| Toml::Table(toml::Table::new()))
             }) {
                 widget.insert(handler.into(), Toml::String(method.to_string()));
+                if append_source {
+                    widget.insert("pass_node".into(), Toml::Boolean(true));
+                }
             }
             return;
         }
@@ -646,7 +656,13 @@ impl Walk<'_> {
 
     /// An AnimationTree's state machine, written beside the scene and run by
     /// its `state_machine` component against the player it names.
-    fn machine(&mut self, section: &Section, stem: &str, files: &mut Vec<(String, String)>) {
+    fn machine(
+        &mut self,
+        document: &Document,
+        section: &Section,
+        stem: &str,
+        files: &mut Vec<(String, String)>,
+    ) {
         let name = section.attr_str("name").unwrap_or("AnimationTree");
         let path = match section.attr_str("parent") {
             None => String::new(),
@@ -681,14 +697,29 @@ impl Walk<'_> {
                 .unwrap_or_default()
         };
         let active = section.field("active") != Some(&Value::Bool(false));
+        // The node its expressions read, which the pre-pass gave the methods.
+        let check_node = section
+            .field("advance_expression_base_node")
+            .and_then(node_path)
+            .unwrap_or_default();
+        if !machine.checks.is_empty()
+            && crate::godot::machine::base_script(document, &self.res, section).is_none()
+        {
+            self.notes.push(format!(
+                "`{path}` (AnimationTree): its advance expressions read a node with no script here; give it the `advance_check_*` methods by hand"
+            ));
+        }
         let Some(table) = self.table(&path) else {
             return;
         };
         let mut component = toml::Table::new();
-        component.insert("machine".into(), Toml::String(file));
-        component.insert("player".into(), Toml::String(player));
-        component.insert("active".into(), Toml::Boolean(active));
-        table.insert("state_machine".into(), Toml::Table(component));
+        component.insert(ak::MACHINE.into(), Toml::String(file));
+        component.insert(ak::PLAYER.into(), Toml::String(player));
+        component.insert(ak::ACTIVE.into(), Toml::Boolean(active));
+        if !machine.checks.is_empty() {
+            component.insert(ak::CHECK_NODE.into(), Toml::String(check_node));
+        }
+        table.insert(MACHINE_COMPONENT.into(), Toml::Table(component));
     }
 
     /// Add an inline asset, or find the one already added with the same

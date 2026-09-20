@@ -1,5 +1,5 @@
 > **Status:** steps 1 to 4 built on 2026-09-12 and 2026-09-13; step 4 is the
-> port's own loop and continues. `balaur import` now translates GDScript bodies, and over
+> port's own loop and continues; §11 has its 2026-09-19 count against Godot. `balaur import` now translates GDScript bodies, and over
 > `../polyglot-pirates-game` all 769 scripts convert, `balaur check` reports
 > **no problems**, and the converted project boots and runs headless. 99.9%
 > of the game's own 46 149 code lines translate: 65 lines are left as marked
@@ -141,10 +141,9 @@ through a small Rune module the importer writes into the project as
 | `is_instance_valid(n)` | `gd::valid(n)` |
 | `typeof(x)`, `x is T` | `gd::type_of(x)`, `gd::is_a(x, "T")` |
 
-Two engine facts make this honest. Ints and floats never mix in Rune, so
-`gd::add` is **not** provided: arithmetic emits directly and a mixed-type
-expression is a run-time error the scenarios find, which is the same
-contract the rest of the port has. And `()` is Rune's nil, so `gd::get`
+Two engine facts make this honest. The fork mixes ints and floats as
+GDScript does, so `gd::add` is **not** provided: arithmetic emits directly.
+And `()` is Rune's nil, so `gd::get`
 returning a default for a missing key is the whole of GDScript's `null`
 handling in one place.
 
@@ -252,7 +251,9 @@ Rune traps it had to design around are named in `emit.rs`'s own header.
 
 ## 9. Open questions
 
-1. **Typed arithmetic.** Ints and floats never mix in Rune, and GDScript
+1. **Typed arithmetic — answered.** The fork now mixes them as GDScript does,
+   and a typed `int` local or parameter truncates what it is given. Before:
+   ints and floats never mixed in Rune, and GDScript
    promotes freely. §3 chooses run-time failure over inference. If the
    scenarios turn up many, the alternative is emitting `as f64` wherever an
    operand's declared type is `float`, which the signatures already carry.
@@ -304,3 +305,37 @@ Getting there closed four bugs worth naming, two of them in the engine:
   the block above it. Every such statement is now bound with `let _ =`.
 - **A required module's function is a field.** `m.f(x)` is not a call;
   `(m.f)(x)` is.
+
+## 11. Where the port stands, 2026-09-19
+
+Measured against Godot's own run of the game's automation, not against
+all-pass: at game commit `dbc9b9539` Godot passes 30 of its 54 scenarios, and
+the port passes the same 30, run headless on a release build.
+
+This round closed these rules in the translator and its shim:
+
+- `is_a` and `find_children` match script classes by path, with the class
+  table built once; per node it had cost a whole frame on a 5 278-node scene.
+- `OptionButton` items are the dropdown's `options`: `add_item`, `clear`,
+  `select`, `selected` and `item_count`.
+- `get_global_rect` and `get_rect` read where the widget layer drew a control.
+- `other.some_signal.emit()` runs the widget's own handler for a control
+  signal, and reaches whatever connected for a script's own.
+- `a.b["k"] = v` writes into the table `a.b` hands back, through `gd.set`.
+- `remove_child` parks the node under the root, hidden, until it is added back.
+- Vectors are value types in the engine, as in Godot, so `v.x = n` translates
+  as written.
+- A node's class constants read through the node, and a static's properties
+  are written through `set_field`.
+- A text-keyed dictionary asked for an int key answers the default.
+- Camera zoom tweens, `min_value`/`max_value`, `is_visible_in_tree`,
+  `get_child_count`, the path verbs on strings and
+  `DisplayServer.window_get_size` are mapped.
+
+`node.call` and `node.script_field` between two Rune scripts hand over the
+values themselves, so a dictionary read off another script's node is that
+script's own, as Godot's is. The hand-ported `GamendController` carries the
+`latest_*` state members and the loot catalog's country provider.
+
+A debug build runs this scene at about three frames a second, too slow for a
+scenario's 20-second waits; the runs use `target/release/balaur`.

@@ -11,6 +11,12 @@ use crate::shared::{SHARED_FNS, trampoline};
 use crate::tooling::{completion_rows, hover_row, location_row, location_rows, symbol_rows};
 use crate::{HOSTS, RuneHost};
 
+thread_local! {
+    /// What `script::store` holds, per host slot, until the thread ends.
+    static STORE: std::cell::RefCell<std::collections::BTreeMap<(usize, String), rune::Value>> =
+        const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
+}
+
 /// Everything a script may ask about — or borrow from — another script.
 ///
 /// The host is registered in the thread's `HOSTS` table and reached by slot,
@@ -37,6 +43,21 @@ pub(crate) fn script_module(host: &RuneHost) -> Result<rune::Module> {
             }
         })
         .build()?;
+    // `script::store(key, value)` and `script::stored(key)`: state no one
+    // node owns, as a Godot `static var` is. Any value, held by reference,
+    // so a list stored and then changed is the list `stored` hands back.
+    script
+        .function("store", move |key: &str, value: rune::Value| {
+            STORE.with_borrow_mut(|store| store.insert((slot, key.to_string()), value));
+        })
+        .build()?;
+    script
+        .function("stored", move |key: &str| -> rune::Value {
+            STORE
+                .with_borrow(|store| store.get(&(slot, key.to_string())).cloned())
+                .unwrap_or_else(|| rune::to_value(()).expect("unit always converts"))
+        })
+        .build()?;
     // `script::shared(f, arity)` — a callback made in this unit, callable
     // from another unit's VM. Arity is explicit: a wrapper is typed.
     script
@@ -45,7 +66,7 @@ pub(crate) fn script_module(host: &RuneHost) -> Result<rune::Module> {
             let wrapped = SHARED_FNS.with(|shared| {
                 let mut shared = shared.borrow_mut();
                 shared.push(f);
-                trampoline(shared.len() - 1, arity)
+                trampoline(shared.len() - 1, arity, "a shared function")
             });
             if let Some(function) = wrapped {
                 return rune::to_value(function).expect("a function always converts");

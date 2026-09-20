@@ -42,6 +42,14 @@ Gamend, read on 2026-09-13:
   (`lobby_member_joined`, `party_invite_accepted`, `kv_updated`, …), fed by
   a dispatch over about seventy server event names. No table holds that
   dispatch; it is code.
+- Beside it, the WebRTC layer: `GamendSignalingClient` (459 lines) joins
+  a lobby's `signaling:<lobby_id>` channel and opens WebRTC peers in a star
+  or a mesh, with `peer_joined`, `peer_connected` and `send_data`;
+  `GamendWebRTC` and `GamendWebRTCPeer` open a data channel to Gamend's own
+  peer for hook calls. All three stand on Godot's `WebRTCPeerConnection`.
+  The Rune addon has none of them: they wait on a WebRTC transport in the
+  engine, and are step 6. `GamendLogs`, which ships client log lines into
+  the server's own log stream, is missing too and waits on nothing.
 - The document: 243 operations over 207 paths, every one with a unique
   `operationId`, 144 with no path parameter, 91 with one, 8 with two; 98
   bodies, 93 of them with named fields; 55 with query parameters; one with
@@ -88,19 +96,21 @@ an event table, and writes the addon. It is about six hundred lines, needs
 no Docker, and `clients/generate_balaur.sh` wraps it the way
 `generate_godot.sh` wraps the other.
 
-**The addon is Rune modules, laid out like the Godot addon.** Generated:
+**The addon is Rune modules, one per tag.** Balaur mounts an addon's files,
+so `addons/gamend/lobbies.rn` is `gamend::lobbies` in every script with no
+`require`. Generated:
 
-- `addons/gamend/api.rn` — the façade. One `pub fn` per operation, named
-  `<tag>_<operationId>` exactly as `GamendApi.gd` names it, so a game ported
-  from Godot calls the same name and the translated Polyglot Pirates code
-  needs no renaming. Naming lints do not apply: this is a project script,
-  not engine API.
-- `addons/gamend/events.rn` — one constant per realtime signal
-  (`EVENT_LOBBY_MEMBER_JOINED = "lobby_member_joined"`, all 84) and
+- One file per OpenAPI tag, `lobbies.rn` to `admin_kv.rn`, 47 of them. A
+  function is the operation without its tag: `gamend::lobbies::create_lobby`,
+  `gamend::matchmaking::join`, `gamend::admin_kv::upsert_kv`. The `push` tag
+  is `push_tokens.rn`, since `gamend::push` is the engine's own call.
+  Naming lints do not apply: this is a project script, not engine API.
+- `addons/gamend/events.rn` — one `pub mod` per channel of `events.json`,
+  each event without the channel
+  (`gamend::events::lobby::MEMBER_JOINED = "lobby_member_joined"`), and
   `decode(topic, event, payload)`, which turns a raw socket message into
-  `#{ kind, ..fields }` by the event table, normalising `_at_ms` to the REST
-  name where the proto says so. A message the table does not name comes
-  back with `kind = "message"`, as the engine delivers it today.
+  `#{ kind, ..fields }` by the event table. A message the table does not
+  name comes back with `kind = "message"`, as the engine delivers it.
 - `addons/gamend/README.md` — every function with the operation's own
   `summary`, grouped by tag: the SDK's reference, as `apis/*.md` is Godot's.
 - `addons/gamend/version.rn` — `GAMEND_VERSION`, stamped by CI as the Godot
@@ -121,13 +131,24 @@ files exactly as `gamend_template` is:
   `restore_session` through `save::`; `go_offline`, `link`, `unlink`,
   `state`, and a `state_changed` event on the node that owns it.
 - `presence.rn` — the user cache, two verbs.
+- `editor/gamend.rn` — the Gamend dock, an editor plugin the addon carries
+  (`docs/PLAN-gamend.md` step E3).
+- `logs.rn` — `setup`, `pump`, `flush`, `settle`, `report`, as
+  `GamendLogs.gd`, over the engine's log cursor; designed in
+  `docs/PLAN-gamend.md` §2b. `log_sink.rn` is the node script that runs
+  it. Step 6.
+- `prefs.rn` — `get`, `set`, `all`, `remove` over a local save slot, which
+  the Gamend dock's Data tab edits (`docs/PLAN-gamend.md` step E3d).
+- `signaling.rn` and `webrtc.rn` — the WebRTC layer, as
+  `GamendSignalingClient.gd` and `GamendWebRTC.gd`. Step 6, once the engine
+  has the transport.
 
-**One call shape, under the five-argument limit.** A façade function takes
-the node, the path parameters in path order, a `params` table for the body,
-and an `options` table for the query: `(api.lobbies_quick_join)(node,
-#{ title: "duel", max_users: 2 })`, `(api.quests_my_quests)(node, (),
+**One call shape, under the five-argument limit.** A function takes the
+node, the path parameters in path order, a `params` table for the body, and
+an `options` table for the query: `gamend::lobbies::quick_join(node,
+#{ title: "duel", max_users: 2 })`, `gamend::quests::my_quests(node,
 #{ category: "daily" })`. With at most two path parameters that is at most
-five arguments, which is the trampoline's ceiling — measured, not assumed.
+five arguments, the most a mounted function takes.
 Each function checks the body's required fields against the document and
 returns `()` with a logged error naming the field before any I/O; otherwise
 it returns the id `gamend::rest` returns, so a caller awaits it with
@@ -150,8 +171,8 @@ Gamend checkout beside this one or from the addon artifact Gamend's CI
 publishes, the way the website's `sync-docs.sh` refreshes from this
 repository's `docs/generated`. The Library dock's card for an addon copies
 the directory into the open project; `balaur new --addon gamend` does the
-same for a new one. The engine's own tests exercise the copy against the
-in-process Gamend stand-in in `crates/balaur_gamend/tests`.
+same for a new one. The engine's own tests exercise the copy against a
+real server, gamend.org by default (`crates/balaur_gamend/tests`).
 
 **Copied into a game as `addons/gamend/`.** Polyglot Pirates' port lists
 `/addons/gamend/` in `port/ported.txt` so `port/reimport.sh` never
@@ -177,20 +198,25 @@ outside the node that called it.
 
 | Piece | Count | Generated or written |
 | --- | --: | --- |
-| Façade functions, one per operation | 243 | generated, `api.rn` |
+| Functions, one per operation, in 47 modules | 259 | generated, one file per tag |
 | Of which admin, answered 403 without an admin token | 89 | generated |
 | Realtime event constants and their decoders | 84 | generated, `events.rn`, from `events.json` |
 | Proto messages the decoders shape | 31 | generated |
 | Client verbs | 16 | written, `client.rn` |
 | Auth verbs | 20 | written, `auth.rn` |
 | Presence verbs | 2 | written, `presence.rn` |
+| The Gamend dock | 1 | written, `editor/gamend.rn` |
+| Log verbs | 7 | written, `logs.rn` and `log_sink.rn`, step 6 |
+| Pref verbs | 4 | written, `prefs.rn`, with the dock |
+| Signaling verbs: `connect_to_peer`, `send_data`, `broadcast_data`, `close_peer`, … | 12 | written, `signaling.rn`, step 6 |
+| WebRTC hook-channel verbs: `connect_webrtc`, `call_hook`, `send_data`, … | 8 | written, `webrtc.rn`, step 6 |
 | Engine calls underneath | 9 | unchanged, `crates/balaur_gamend` |
 
 ## 3. Steps
 
-Steps 1, 2 and 5 are Gamend-side and run in `../gamend`; 3 and 4 are here
-and in the port. Both repositories see the same addon, so the split is by
-where the file lives, not by who does it.
+Steps 1, 2, 5 and 6 are Gamend-side and run in `../gamend`; 3 and 4 are
+here and in the port. Both repositories see the same addon, so the split is
+by where the file lives, not by who does it.
 
 - **1. The generator (Gamend) — built.** `clients/generate_balaur.py`,
   `clients/generate_balaur.sh`, `clients/events.json` seeded from the Godot
@@ -209,9 +235,8 @@ where the file lives, not by who does it.
   `addon` kind in `manifest.toml` and the dock, `balaur new --addon`,
   `scripts/sync_gamend.sh`. Ends with: a new project from any template plus
   the addon passes `balaur check`, and a test in `crates/balaur_gamend/tests`
-  boots it against the in-process stand-in and calls
-  `users_get_current_user`, `rpc_call` and one decoded event through the
-  addon rather than through `rest`.
+  boots it against gamend.org and calls the addon's own functions (a query,
+  a path parameter) and one decoded event rather than `rest`.
 - **4. The port.** `/addons/gamend/` in `ported.txt` and
   `port/sync_gamend.sh` are done: the SDK is copied in rather than
   translated, and the scenarios still pass. What is left is the call
@@ -232,6 +257,32 @@ where the file lives, not by who does it.
   `GAMEND_VERSION`, publishes `balaur_addons/addons/gamend` as an artifact
   beside the Godot one. Ends with: a version bump in Gamend reaches a game
   with `sync_gamend.sh` and nothing typed by hand.
+- **6. The rest of the Godot addon (Gamend).** What `gamend_template` has
+  and `balaur_template` does not. `logs.rn` first: the policy fetch, the
+  level floors, repeats folded, batches, the spool and the previous run's
+  log tail, as `docs/PLAN-gamend.md` §2b sets out. It needs the engine's
+  `log::since` and log file (step E4 there), and nothing from WebRTC. Then the WebRTC layer, once the engine has a WebRTC transport
+  (`docs/PLAN-networking.md` step 14): `signaling.rn` joins
+  `signaling:<lobby_id>`, relays offers, answers and ICE, connects peers in
+  a star or a mesh, and gives a game `send_data(user_id, label, bytes)`,
+  `broadcast_data` and the `peer_*` and `channel_*` events, as
+  `GamendSignalingClient.gd` does; `webrtc.rn` opens the data channel to
+  Gamend's own peer and calls hooks over it, as `GamendWebRTC.gd` does.
+  These are Gamend's: what a game sends is its own bytes between users,
+  and the engine's `multiplayer` module (`docs/PLAN-multiplayer.md`) is not
+  involved. Ends with: a log line submitted from a game shows in the
+  server's stream; then two engines in one lobby exchange bytes through
+  `send_data` with no hook between them.
+- **7. The SDK by path — built.** The engine mounts an addon's
+  `addons/<name>/<file>.rn` as the module `<name>::<file>`
+  (`crates/balaur_script_rune/src/mounts.rs`). `clients/sdkgen/balaur.py`
+  writes one file per tag and `events.rn` as a `pub mod` per channel, and
+  removes what it no longer writes. The flat constants are gone, so each
+  event has one name. `client.rn`, `auth.rn` and `log_sink.rn` call by path,
+  and `crates/balaur_gamend/tests` names every operation and event by path.
+  The manual's scripting and Gamend pages and the post "Addons by path"
+  describe it. The port's Godot-signature module (step 4) is written against
+  these paths when it is written.
 
 ## 4. What CI can prove
 
@@ -240,10 +291,17 @@ where the file lives, not by who does it.
   engine, fails the build when the addon does not compile. The live flow of
   step 2 runs against `mix dev.start` in the same job, which is the check on
   `events.json`: a server event the table does not name fails it.
-- Balaur: the step 3 test against the in-process stand-in, which grows a
-  recording router so a test can assert the method, path and body any
-  façade function sends without a server. `scripts/sync_gamend.sh --check`
-  in precommit, so the library copy and the version it names never drift.
+- Balaur: the step 3 test against gamend.org in the e2e suite: the public
+  API, and a script that registers by device, calls a hook and deletes its
+  account through the SDK. `scripts/sync_gamend.sh --check` in precommit,
+  so the library copy and the version it names never drift.
+- Accounts: `POST /api/v1/register` signs a player up with an email and a
+  password and answers like login; the engine's `gamend::register` and the
+  addon's `client.register_email` open its session. `DELETE /api/v1/me`
+  declares its optional `current_password`, so `user_delete_current_user`
+  deletes an account that has a password. The e2e suite uses device
+  accounts only, since an email account needs its confirmation link
+  opened; the server's own suite covers email sign-up.
 - The port: its scenarios, as today.
 - What neither can: a real provider's OAuth page, and the socket under a
   real NAT.
@@ -251,8 +309,7 @@ where the file lives, not by who does it.
 ## 5. Open questions
 
 1. **Protobuf on the socket.** The server serves it on request; the Godot
-   addon asks for it. This plan speaks JSON, which is the default and what
-   the stand-in can fake. The generator could emit a decoder from the same
+   addon asks for it. This plan speaks JSON, which is the default. The generator could emit a decoder from the same
    proto when the bytes matter.
 2. **Engine-level bindings too.** The earlier draft of this plan generated
    a Rust module into `crates/balaur_gamend` so every operation appeared in

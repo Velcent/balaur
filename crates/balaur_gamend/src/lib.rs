@@ -10,20 +10,25 @@
 //! The sequential shape reads like this:
 //!
 //! ```rune
-//! function S:init()
-//!     gamend.configure("http://localhost:4000")
-//!     local login = await(gamend.login({ device_id = "player-1" }))
-//!     self.socket = gamend.connect(self.node)
-//!     local hook = await(gamend.call_hook(self.socket, "arena", "start", {}))
-//! end
-//! function S:on_gamend_event(e) ... end  -- socket events: open/message/closed/error
+//! pub async fn init(this) {
+//!     gamend::configure(()); // [gamend] url, gamend.org by default
+//!     task::wait(gamend::login((), #{ device_id: engine::device_id() })).await;
+//!     this.socket = gamend::connect(this.node);
+//! }
+//!
+//! pub async fn on_gamend_event(this, e) {
+//!     if e["kind"] == "open" {
+//!         task::wait(gamend::call_hook(this.socket, "arena", "start", #{})).await;
+//!     }
+//! }
 //! ```
 //!
 //! One-shot operations (login, rest, call_hook, join, push, leave) wake
 //! their returned id and, when a node is given, also dispatch to its
 //! handler. Socket events are a stream, so they only dispatch. Every event
 //! map carries a `kind` — `login`, `rest`, `reply`, `error`, `open`,
-//! `message`, `closed` — so one handler can take them all.
+//! `message`, `reconnecting`, `reopened`, `closed` — so one handler can take
+//! them all.
 
 use std::sync::mpsc::{Sender, channel};
 
@@ -34,9 +39,14 @@ use balaur_core::{DetHashMap, Engine, Stage};
 use balaur_script::{Bindings, BindingsExt, NodeId, Value};
 use serde_json::Value as Json;
 
+mod activity;
 #[cfg(all(target_family = "wasm", not(target_os = "emscripten")))]
 mod browser;
+#[cfg(not(target_os = "emscripten"))]
+mod channels;
 pub mod client;
+mod inspect;
+mod target;
 #[cfg(not(target_family = "wasm"))]
 mod worker;
 
@@ -68,6 +78,12 @@ mod backend {
         pub(crate) fn new(_base_url: &str) -> Self {
             Self
         }
+
+        pub(crate) fn session(&self) -> Option<crate::client::Session> {
+            None
+        }
+
+        pub(crate) fn set_session(&self, _session: Option<crate::client::Session>) {}
     }
 
     pub(crate) fn pump() {}
@@ -115,8 +131,18 @@ mod backend {
 /// Login input, mirrored from [`client::auth::Credentials`] so the wasm
 /// stub compiles without the wire layer.
 pub enum LoginCredentials {
-    EmailPassword { email: String, password: String },
-    Device { device_id: String },
+    EmailPassword {
+        email: String,
+        password: String,
+    },
+    Device {
+        device_id: String,
+    },
+    Register {
+        email: String,
+        password: String,
+        username: Option<String>,
+    },
 }
 
 /// What the engine thread asks a socket worker to do.
@@ -143,6 +169,8 @@ pub(crate) enum SocketCommand {
         args: Json,
     },
     Close,
+    /// Cut the connection as a network failure would, so it reconnects.
+    Interrupt,
 }
 
 /// A completion crossing from a worker thread back to the frame loop.
@@ -187,6 +215,27 @@ pub(crate) enum GamendEvent {
         socket: u64,
         reason: String,
     },
+    /// The connection dropped; try `attempt` starts in `wait` seconds.
+    SocketReconnecting {
+        socket: u64,
+        attempt: u32,
+        reason: String,
+        wait: f64,
+    },
+    /// The connection is back and its topics joined again, but for `lost`,
+    /// which the server refused.
+    SocketReopened {
+        socket: u64,
+        lost: Vec<String>,
+    },
+}
+
+/// How many times a dropped socket tries to come back before it gives up.
+pub(crate) const RECONNECT_TRIES: u32 = 8;
+
+/// Seconds before try `attempt`, counted from 1: 1, 2, 4, 8, 16, then 30.
+pub(crate) fn backoff(attempt: u32) -> f64 {
+    f64::from(1_u32 << attempt.saturating_sub(1).min(5)).min(30.0)
 }
 
 impl GamendEvent {
@@ -223,6 +272,15 @@ impl From<LoginCredentials> for client::Credentials {
                 Self::EmailPassword { email, password }
             }
             LoginCredentials::Device { device_id } => Self::Device { device_id },
+            LoginCredentials::Register {
+                email,
+                password,
+                username,
+            } => Self::Register {
+                email,
+                password,
+                username,
+            },
         }
     }
 }
@@ -244,6 +302,8 @@ pub struct GamendState {
     sockets: DetHashMap<u64, Sender<SocketCommand>>,
     request_handlers: DetHashMap<u64, Handler>,
     socket_handlers: DetHashMap<u64, Handler>,
+    /// Recent calls and sockets, for a dock to show.
+    activity: activity::Activity,
 }
 
 impl GamendState {
@@ -251,6 +311,7 @@ impl GamendState {
     /// second call replaces the client (and forgets the session).
     pub fn configure(&mut self, base_url: &str) {
         self.client = Some(backend::SharedClient::new(base_url));
+        self.activity.configured(base_url);
     }
 
     fn client(&self) -> Result<backend::SharedClient> {
@@ -270,6 +331,12 @@ impl GamendState {
         if let Some(handler) = handler {
             self.request_handlers.insert(request, handler);
         }
+        let (kind, who) = match &credentials {
+            LoginCredentials::Device { .. } => ("login", String::from("device")),
+            LoginCredentials::EmailPassword { email, .. } => ("login", email.clone()),
+            LoginCredentials::Register { email, .. } => ("register", email.clone()),
+        };
+        self.activity.started(request, None, kind, who, None);
         self.io.start(eng, |report| {
             backend::spawn_login(&client, request, credentials, report);
         });
@@ -289,6 +356,13 @@ impl GamendState {
         if let Some(handler) = handler {
             self.request_handlers.insert(request, handler);
         }
+        self.activity.started(
+            request,
+            None,
+            "rest",
+            format!("{method} {path}"),
+            body.as_ref(),
+        );
         self.io.start(eng, |report| {
             backend::spawn_rest(&client, request, method, path, body, report);
         });
@@ -302,6 +376,8 @@ impl GamendState {
         if let Some(handler) = handler {
             self.socket_handlers.insert(socket, handler);
         }
+        self.activity
+            .started(socket, None, "connect", String::from("realtime"), None);
         let (commands, receiver) = channel();
         let started = self.io.start(eng, |report| {
             backend::spawn_socket(&client, socket, receiver, report);
@@ -326,6 +402,8 @@ impl GamendState {
     }
 
     pub fn join(&mut self, socket: u64, request: u64, topic: String, payload: Json) -> Result<()> {
+        self.activity
+            .started(request, Some(socket), "join", topic.clone(), Some(&payload));
         self.command(
             socket,
             request,
@@ -345,6 +423,13 @@ impl GamendState {
         event: String,
         payload: Json,
     ) -> Result<()> {
+        self.activity.started(
+            request,
+            Some(socket),
+            "push",
+            format!("{topic} {event}"),
+            Some(&payload),
+        );
         self.command(
             socket,
             request,
@@ -358,6 +443,8 @@ impl GamendState {
     }
 
     pub fn leave(&mut self, socket: u64, request: u64, topic: String) -> Result<()> {
+        self.activity
+            .started(request, Some(socket), "leave", topic.clone(), None);
         self.command(socket, request, SocketCommand::Leave { request, topic })
     }
 
@@ -369,6 +456,13 @@ impl GamendState {
         function: String,
         args: Json,
     ) -> Result<()> {
+        self.activity.started(
+            request,
+            Some(socket),
+            "hook",
+            format!("{plugin}.{function}"),
+            Some(&args),
+        );
         self.command(
             socket,
             request,
@@ -385,6 +479,12 @@ impl GamendState {
         self.sockets
             .get(&socket)
             .is_some_and(|commands| commands.send(SocketCommand::Close).is_ok())
+    }
+
+    pub fn interrupt(&mut self, socket: u64) -> bool {
+        self.sockets
+            .get(&socket)
+            .is_some_and(|commands| commands.send(SocketCommand::Interrupt).is_ok())
     }
 }
 
@@ -420,6 +520,7 @@ fn pump_gamend_system(eng: &Engine, _: f32) {
         let mut snapshot = snapshot.borrow_mut();
         snapshot.events.clear();
         for event in state.io.drain() {
+            state.activity.heard(&event);
             let (handler, wake) = match &event {
                 GamendEvent::LoggedIn { request, .. }
                 | GamendEvent::RestDone { request, .. }
@@ -432,11 +533,17 @@ fn pump_gamend_system(eng: &Engine, _: f32) {
                     state.sockets.shift_remove(socket);
                     (state.socket_handlers.shift_remove(socket), None)
                 }
-                GamendEvent::SocketOpen { socket } | GamendEvent::SocketMessage { socket, .. } => {
+                GamendEvent::SocketOpen { socket }
+                | GamendEvent::SocketMessage { socket, .. }
+                | GamendEvent::SocketReconnecting { socket, .. }
+                | GamendEvent::SocketReopened { socket, .. } => {
                     (state.socket_handlers.get(socket).cloned(), None)
                 }
             };
             let value = event_value(event);
+            if let Some(request) = wake {
+                state.activity.keep_reply(request, value.clone());
+            }
             if handler.is_some() || wake.is_some() {
                 dispatches.push((handler, wake, value.clone()));
             }
@@ -521,11 +628,31 @@ fn event_value(event: GamendEvent) -> Value {
             ("kind".into(), Value::Str("error".into())),
             ("reason".into(), Value::Str(reason)),
         ],
+        GamendEvent::SocketReconnecting {
+            socket,
+            attempt,
+            reason,
+            wait,
+        } => vec![
+            ("socket".into(), int(socket)),
+            ("kind".into(), Value::Str("reconnecting".into())),
+            ("attempt".into(), Value::Int(i64::from(attempt))),
+            ("reason".into(), Value::Str(reason)),
+            ("wait".into(), Value::Num(wait)),
+        ],
+        GamendEvent::SocketReopened { socket, lost } => vec![
+            ("socket".into(), int(socket)),
+            ("kind".into(), Value::Str("reopened".into())),
+            (
+                "lost".into(),
+                Value::List(lost.into_iter().map(Value::Str).collect()),
+            ),
+        ],
     };
     Value::Map(pairs)
 }
 
-fn int(id: u64) -> Value {
+pub(crate) fn int(id: u64) -> Value {
     Value::Int(i64::try_from(id).unwrap_or(i64::MAX))
 }
 
@@ -551,6 +678,7 @@ impl balaur_plugin::Plugin for GamendPlugin {
         reg.insert_resource(GamendSnapshot::default());
         reg.add_system(Stage::First, pump_gamend_system);
         reg.add_replay_source("gamend", capture_gamend, restore_gamend);
+        target::declare(reg.engine());
         let mut m = reg.script_module("gamend")?;
         install_gamend_api(&mut *m);
         Ok(())
@@ -597,6 +725,21 @@ fn credentials_of(spec: &Value) -> Result<LoginCredentials> {
     }
 }
 
+fn account_of(spec: &Value) -> Result<LoginCredentials> {
+    let field = |key: &str| match opt(Some(spec), key) {
+        Some(Value::Str(s)) => Some(s.clone()),
+        _ => None,
+    };
+    match (field("email"), field("password")) {
+        (Some(email), Some(password)) => Ok(LoginCredentials::Register {
+            email,
+            password,
+            username: field("username"),
+        }),
+        _ => Err(anyhow!("an account needs an `email` and a `password`")),
+    }
+}
+
 fn json_of(value: Option<&Value>) -> Result<Json> {
     match value {
         None | Some(Value::Nil) => Ok(Json::Object(serde_json::Map::new())),
@@ -612,16 +755,20 @@ fn install_gamend_api(m: &mut dyn Bindings<Engine>) {
         "The Gamend backend: session, REST API and realtime socket. Each call returns an id to await; the result also reaches the node's `on_gamend_event` (or `on_event`) as a `kind` map.",
     );
     m.describe(&[
-        ("configure", &[], "", "Point the plugin at a server's base url; every other call errors until this one runs."),
+        ("configure", &[], "(url: string?)", "Point the plugin at a server and answer its url; with none, the one `[gamend]` names for this run (see `target`). Every other call errors until this one runs."),
         ("login", &[], "", "Open a session from a `device_id`, or an `email` and `password`, and return the id its `login` result answers."),
+        ("register", &[], "(node: node?, account: map)", "Make an account from an `email` and a `password` (and a `username`, generated when left out) and open its session, as `login` does; its result is a `login` one. The server mails the address its confirmation link."),
         ("rest", &[], "", "Call a path on the configured server over HTTP; the result carries the `status` and the decoded `body`."),
-        ("connect", &[], "", "Open the realtime socket and return the id `join`, `push`, `leave`, `call_hook` and `close` take."),
+        ("connect", &[], "", "Open the realtime socket and return the id `join`, `push`, `leave`, `call_hook` and `close` take. A dropped connection comes back on its own: the handler hears `reconnecting` before each try, then `reopened` once its topics are joined again, or `error` when it gives up."),
     ]);
     // `gamend.configure(url)` — where the server lives. Everything else
     // errors until this is called.
-    m.function("configure", |eng: &Engine, url: String| {
+    m.function("configure", |eng: &Engine, url: Option<String>| {
+        let url = url
+            .filter(|url| !url.is_empty())
+            .unwrap_or_else(|| target::url(eng));
         eng.resource::<GamendState>().borrow_mut().configure(&url);
-        Ok(())
+        Ok(Value::Str(url))
     });
     // `gamend.login(node|nil, { device_id = ... } or { email = ..,
     // password = .. })` -> id. Completion: `{ request, user_id, username,
@@ -639,6 +786,22 @@ fn install_gamend_api(m: &mut dyn Bindings<Engine>) {
             eng.resource::<GamendState>()
                 .borrow_mut()
                 .login(eng, id, credentials, handler)?;
+            Ok(int(id))
+        },
+    );
+    m.function(
+        "register",
+        |eng: &Engine, (node, spec, opts): (Value, Option<Value>, Option<Value>)| {
+            let (node, spec) = normalize_target(node, spec);
+            let account = account_of(
+                spec.as_ref()
+                    .ok_or_else(|| anyhow!("register needs an account table"))?,
+            )?;
+            let handler = handler_of(&node, opts.as_ref(), "on_gamend_event")?;
+            let id = eng.next_token();
+            eng.resource::<GamendState>()
+                .borrow_mut()
+                .login(eng, id, account, handler)?;
             Ok(int(id))
         },
     );
@@ -679,6 +842,7 @@ fn install_gamend_api(m: &mut dyn Bindings<Engine>) {
         },
     );
     install_gamend_socket_api(m);
+    inspect::install(m);
 }
 
 /// The per-connection half of `gamend.*`: operations on an open socket.
@@ -689,6 +853,7 @@ fn install_gamend_socket_api(m: &mut dyn Bindings<Engine>) {
         ("leave", &[], "", "Unsubscribe the socket from a topic, returning the id the `reply` answers."),
         ("call_hook", &[], "", "Call a server plugin's function over the socket; the reply's `response` holds `data` or `error`."),
         ("close", &[], "", "Shut the socket down; false when the connection was already gone."),
+        ("interrupt", &[], "(socket: int)", "Cut the connection as a network failure would, to try a game's reconnect path: the socket reports `reconnecting`, then `reopened`. False when it is already gone."),
     ]);
     // `gamend.join(socket, topic, payload?)` -> id; reply arrives as
     // `{ request, kind = "reply", status, response }`.
@@ -755,6 +920,11 @@ fn install_gamend_socket_api(m: &mut dyn Bindings<Engine>) {
             .is_ok_and(|id| eng.resource::<GamendState>().borrow_mut().close(id));
         Ok(Value::Bool(closed))
     });
+    m.function("interrupt", |eng: &Engine, socket: i64| {
+        let cut = u64::try_from(socket)
+            .is_ok_and(|id| eng.resource::<GamendState>().borrow_mut().interrupt(id));
+        Ok(Value::Bool(cut))
+    });
 }
 
 /// `login` may be called with or without a leading node, like
@@ -768,4 +938,13 @@ fn normalize_target(node: Value, spec: Option<Value>) -> (Value, Option<Value>) 
 
 fn token_of(id: i64) -> Result<u64> {
     u64::try_from(id).map_err(|_| anyhow!("not a gamend handle: {id}"))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_reconnect_waits_twice_as_long_each_try_up_to_thirty_seconds() {
+        let waits: Vec<f64> = (1..=crate::RECONNECT_TRIES).map(crate::backoff).collect();
+        assert_eq!(waits, [1.0, 2.0, 4.0, 8.0, 16.0, 30.0, 30.0, 30.0]);
+    }
 }

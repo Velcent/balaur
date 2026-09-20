@@ -1,6 +1,11 @@
 //! Conversions between the neutral `balaur_script::Value` and Rune's.
 
 pub(crate) mod component;
+mod glam_api;
+pub(crate) mod glam_types;
+mod live;
+
+pub use glam_types::{Vec2, Vec3};
 
 use anyhow::{Result, anyhow};
 use balaur_script::{CallbackId, Value as Neutral};
@@ -27,28 +32,6 @@ impl Node {
     }
 }
 
-/// A vector as scripts see it. Rune has no tuple-struct literals across the
-/// FFI, so bindings take and return this.
-#[derive(rune::Any, Clone, Copy)]
-#[rune(item = ::balaur)]
-pub struct Vec2 {
-    #[rune(get, set)]
-    pub x: f64,
-    #[rune(get, set)]
-    pub y: f64,
-}
-
-#[derive(rune::Any, Clone, Copy)]
-#[rune(item = ::balaur)]
-pub struct Vec3 {
-    #[rune(get, set)]
-    pub x: f64,
-    #[rune(get, set)]
-    pub y: f64,
-    #[rune(get, set)]
-    pub z: f64,
-}
-
 #[derive(rune::Any, Clone, Copy)]
 #[rune(item = ::balaur)]
 pub struct Color {
@@ -62,12 +45,93 @@ pub struct Color {
     pub a: f64,
 }
 
-/// Register the value types every binding may see, and give `Node` the whole
-/// engine node API as methods.
-///
-/// The operations come from `balaur_core::node_api::NODE_OPS`, so this is
-/// only the `node.position()` sugar — the behaviour is shared with every other
-/// language.
+/// A colour's four channels, so one set of operators serves them.
+trait Lanes: rune::Any + Copy {
+    fn lanes(&self) -> [f64; 4];
+    fn from_lanes(lanes: [f64; 4]) -> Self;
+}
+
+impl Lanes for Color {
+    fn lanes(&self) -> [f64; 4] {
+        [self.r, self.g, self.b, self.a]
+    }
+    fn from_lanes(l: [f64; 4]) -> Self {
+        Self {
+            r: l[0],
+            g: l[1],
+            b: l[2],
+            a: l[3],
+        }
+    }
+}
+
+/// The right side of an operator: the same type lane by lane, or one number
+/// for every lane.
+fn rhs<T: Lanes>(value: &rune::Value) -> anyhow::Result<[f64; 4]> {
+    if let Ok(other) = value.borrow_ref::<T>() {
+        return Ok(other.lanes());
+    }
+    if let Ok(f) = value.as_float() {
+        return Ok([f; 4]);
+    }
+    if let Ok(i) = value.as_signed() {
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "a script integer used as a scale"
+        )]
+        return Ok([i as f64; 4]);
+    }
+    Err(anyhow!(
+        "`{}` is not a number or the same kind of vector",
+        value.type_info()
+    ))
+}
+
+fn zip<T: Lanes>(a: &T, b: &rune::Value, f: fn(f64, f64) -> f64) -> anyhow::Result<T> {
+    let (l, r) = (a.lanes(), rhs::<T>(b)?);
+    Ok(T::from_lanes([
+        f(l[0], r[0]),
+        f(l[1], r[1]),
+        f(l[2], r[2]),
+        f(l[3], r[3]),
+    ]))
+}
+
+#[allow(clippy::float_cmp, reason = "Godot's `==` on a vector is exact too")]
+fn same<T: Lanes>(a: &T, b: &rune::Value) -> bool {
+    b.borrow_ref::<T>().is_ok_and(|b| b.lanes() == a.lanes())
+}
+
+/// An operator's failure raised in the script, where a `Result` would be a
+/// value the script never looks at.
+fn vm<T>(result: anyhow::Result<T>) -> rune::runtime::VmResult<T> {
+    match result {
+        Ok(value) => rune::runtime::VmResult::Ok(value),
+        Err(why) => rune::runtime::VmResult::Err(rune::runtime::VmError::panic(why.to_string())),
+    }
+}
+
+/// `+ - * /` and `==` on a colour; `c += d` is `c = c + d`.
+macro_rules! arithmetic {
+    ($m:expr, $t:ty) => {{
+        use rune::runtime::Protocol as P;
+        $m.associated_function(&P::ADD, |a: &$t, b: rune::Value| {
+            vm(zip::<$t>(a, &b, |x, y| x + y))
+        })?;
+        $m.associated_function(&P::SUB, |a: &$t, b: rune::Value| {
+            vm(zip::<$t>(a, &b, |x, y| x - y))
+        })?;
+        $m.associated_function(&P::MUL, |a: &$t, b: rune::Value| {
+            vm(zip::<$t>(a, &b, |x, y| x * y))
+        })?;
+        $m.associated_function(&P::DIV, |a: &$t, b: rune::Value| {
+            vm(zip::<$t>(a, &b, |x, y| x / y))
+        })?;
+        $m.associated_function(&P::PARTIAL_EQ, |a: &$t, b: rune::Value| same::<$t>(a, &b))?;
+        $m.associated_function(&P::EQ, |a: &$t, b: rune::Value| same::<$t>(a, &b))?;
+    }};
+}
+
 pub(crate) fn install(
     m: &mut rune::Module,
     engine: &balaur_core::Engine,
@@ -76,9 +140,24 @@ pub(crate) fn install(
     // `a == b` on two handles: the same node. Anything else is not equal.
     m.associated_function(&rune::runtime::Protocol::PARTIAL_EQ, Node::same)?;
     m.associated_function(&rune::runtime::Protocol::EQ, Node::same)?;
-    m.ty::<Vec2>()?;
-    m.ty::<Vec3>()?;
+    // A node keys a map by its id, as Godot's dictionaries key by object.
+    m.associated_function(
+        &rune::runtime::Protocol::HASH,
+        |n: &Node, hasher: &mut rune::runtime::Hasher| {
+            std::hash::Hasher::write_u64(hasher, n.id);
+        },
+    )?;
     m.ty::<Color>()?;
+    m.function("new", |r: f64, g: f64, b: f64, a: f64| Color { r, g, b, a })
+        .build_associated::<Color>()?;
+    arithmetic!(m, Color);
+    glam_types::copy!(m, Color);
+    m.associated_function("with_r", |c: &Color, r: f64| Color { r, ..*c })?;
+    m.associated_function("with_g", |c: &Color, g: f64| Color { g, ..*c })?;
+    m.associated_function("with_b", |c: &Color, b: f64| Color { b, ..*c })?;
+    m.associated_function("with_a", |c: &Color, a: f64| Color { a, ..*c })?;
+    glam_types::install(m)?;
+    glam_api::install(m)?;
 
     // A component-driven operation lives on that component's handle
     // (`node.transform.translate`); the node keeps only what no component owns.
@@ -94,10 +173,26 @@ pub(crate) fn install(
         let call = declared.call;
         let engine = engine.clone();
         let handle = crate::bindings::hold_node_fn(engine, call);
-        m.raw_function(
-            declared.name,
-            crate::bindings::bound_handler(handle, "node method was registered on another thread"),
-        )
+        let bound =
+            crate::bindings::bound_handler(handle, "node method was registered on another thread");
+        // Between two Rune scripts these hand over the values themselves.
+        match declared.name {
+            "call" => m.raw_function(
+                declared.name,
+                live::live_or(handle, bound, |host, node, args| {
+                    let method = args.first()?.borrow_string_ref().ok()?.to_owned();
+                    host.call_live(node, &method, &args[1..])
+                }),
+            ),
+            "script_field" => m.raw_function(
+                declared.name,
+                live::live_or(handle, bound, |host, node, args| {
+                    let name = args.first()?.borrow_string_ref().ok()?.to_owned();
+                    host.field_live(node, &name)
+                }),
+            ),
+            _ => m.raw_function(declared.name, bound),
+        }
         .build_associated::<Node>()?;
     }
     component::install(m, engine)?;
@@ -157,6 +252,23 @@ pub(crate) fn to_neutral(v: &rune::Value) -> Result<Neutral> {
         }
         // Rune objects do not preserve insertion order; sort so a binding sees
         // the same map every run.
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        return Ok(Neutral::Map(out));
+    }
+    // A map keyed by more than strings, as a Godot dictionary is: its keys
+    // spelled as text, the way JSON spells them.
+    if let Ok(map) = v.borrow_ref::<rune::modules::collections::HashMap>() {
+        let mut out = Vec::new();
+        for (k, val) in map.entries()? {
+            let key = match to_neutral(&k)? {
+                Neutral::Str(s) => s,
+                Neutral::Int(i) => i.to_string(),
+                Neutral::Num(n) => n.to_string(),
+                Neutral::Bool(b) => b.to_string(),
+                other => return Err(anyhow!("a map key cannot be {other:?}")),
+            };
+            out.push((key, to_neutral(&val)?));
+        }
         out.sort_by(|a, b| a.0.cmp(&b.0));
         return Ok(Neutral::Map(out));
     }
@@ -233,6 +345,11 @@ pub(crate) fn to_plain(v: &rune::Value) -> Option<Neutral> {
         out.sort_by(|a, b| a.0.cmp(&b.0));
         return Some(Neutral::Map(out));
     }
+    if v.borrow_ref::<rune::modules::collections::HashMap>()
+        .is_ok()
+    {
+        return to_neutral(v).ok();
+    }
     if let Ok(t) = v.borrow_tuple_ref()
         && t.is_empty()
     {
@@ -291,8 +408,12 @@ pub(crate) fn from_neutral(v: &Neutral) -> Result<rune::Value> {
             }
             rune::to_value(obj)?
         }
+        // A function one script returned to another: the same function, while
+        // the call that handed it over still holds it.
         Neutral::Callback(CallbackId(id)) => {
-            return Err(anyhow!("cannot hand callback {id} back to a script"));
+            let function = crate::bindings::lookup_callback(CallbackId(*id))
+                .ok_or_else(|| anyhow!("callback {id} was used after its call returned"))?;
+            rune::to_value(function)?
         }
     };
     Ok(out)

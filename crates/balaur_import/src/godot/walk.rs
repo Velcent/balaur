@@ -43,6 +43,7 @@ impl Walk {
         let mut report = Report::default();
         let mut sink = ProjectSink::new(project);
         sink.put("project.toml", converted.project_toml.as_bytes())?;
+        sink.put("godot_settings.rn", converted.settings_module.as_bytes())?;
         report.section("project.godot", converted.notes);
         // A project's own faces come first in every font chain, from `fonts/`.
         if let Some(font) = super::project::custom_font(&document, &uids, &root) {
@@ -98,10 +99,20 @@ impl Walk {
                 }
             }
         } else if extension == "gd" {
-            let source = super::io::text(&self.root.join(&relative))?;
+            let mut source = super::io::text(&self.root.join(&relative))?;
+            if let Some(checks) = self.lookups.checks.get(&relative) {
+                source.push_str(&super::machine::check_functions(checks));
+            }
             let converted = super::script::convert(&source, &relative, &self.lookups.classes);
             let target = format!("{}.rn", relative.trim_end_matches(".gd"));
             self.sink.put(&target, converted.rune.as_bytes())?;
+            for (name, inner) in super::script::inner_classes(&source) {
+                let file = super::script::inner_file(&relative, &name);
+                let module = super::script::convert(&inner, &file, &self.lookups.classes);
+                self.sink
+                    .put(&file.replace(".gd", ".rn"), module.rune.as_bytes())?;
+                self.report.section(&file, module.notes);
+            }
             self.scripts += 1;
             self.report.section(&relative, converted.notes);
         } else if extension == "tres" {
@@ -110,6 +121,7 @@ impl Walk {
             {
                 self.report.section(&relative, notes);
             }
+            super::files::script_resource(&self.root, &relative, &mut self.sink, &self.lookups)?;
         } else if COPIED.contains(&extension.as_str()) && !is_translation(&self.root, &relative) {
             // Read and written one at a time, so a project's art never
             // gathers in memory on its way across.
@@ -124,6 +136,9 @@ impl Walk {
         if self.scripts > 0 {
             // Every converted body calls into the shim, so it ships with them.
             self.sink.put("gd.rn", super::gdscript::SHIM.as_bytes())?;
+            let classes = super::exports::class_table(&self.lookups.classes);
+            self.sink
+                .put(super::exports::CLASS_TABLE, classes.as_bytes())?;
         }
         let (scenes, scripts, failed) = (self.scenes, self.scripts, self.failed);
         let lines = self.report.write(&mut self.sink)?;

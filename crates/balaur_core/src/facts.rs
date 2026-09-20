@@ -22,6 +22,10 @@ pub struct PlatformFacts {
     #[serde(default)]
     pub touchscreen: bool,
     pub editor: bool,
+    /// Running from the project's sources rather than an exported pack:
+    /// Godot's debug build.
+    #[serde(default)]
+    pub dev: bool,
     pub system_locale: Option<String>,
     pub device_id: String,
 }
@@ -40,6 +44,9 @@ impl PlatformFacts {
             mobile: cfg!(mobile),
             touchscreen: touchscreen(),
             editor: eng.debug_scope().is_some(),
+            dev: !eng
+                .try_resource::<crate::project::ProjectFiles>()
+                .is_some_and(|files| files.borrow().from_pack()),
             system_locale: sys_locale::get_locale(),
             device_id: device_id(eng),
         }
@@ -79,6 +86,12 @@ pub fn platform(eng: &Engine) -> PlatformFacts {
     read
 }
 
+/// Read the facts again on next use: the editor does this after pointing the
+/// user data home at the game it plays, so the device id is the game's.
+pub fn reread(eng: &Engine) {
+    eng.resource::<Facts>().borrow_mut().0 = None;
+}
+
 /// The wall clock as of the top of this tick, in seconds since the epoch.
 /// Read once per frame and recorded, never mid-tick.
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
@@ -94,7 +107,7 @@ pub struct WallClock {
     reason = "the wall clock seeds an id made once per install, outside any tick"
 )]
 fn device_id(eng: &Engine) -> String {
-    let path = crate::engine_api::user_data_dir_of(eng).join("device_id");
+    let path = crate::save::home(eng).join("device_id");
     let fs = crate::files::backend(eng);
     if let Ok(bytes) = fs.read(&path) {
         let text = String::from_utf8_lossy(&bytes).trim().to_string();
