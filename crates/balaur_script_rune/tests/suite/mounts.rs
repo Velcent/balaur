@@ -265,3 +265,49 @@ fn hovering_a_mounted_function_shows_its_parameters_and_doc() {
     assert_eq!(found.detail, "(x)");
     assert_eq!(found.doc, "Twice `x`.");
 }
+
+#[test]
+fn a_mounted_function_takes_as_many_arguments_as_it_declares() {
+    let dir = project(&[
+        (
+            "addons/kit/wide.rn",
+            "pub fn sum(a, b, c, d, e, f, g, h, i) { a + b + c + d + e + f + g + h + i }\n",
+        ),
+        (
+            "user.rn",
+            "pub fn init(this) { this.out = kit::wide::sum(1, 2, 3, 4, 5, 6, 7, 8, 9) as f64; }\n",
+        ),
+    ]);
+    let app = app_in(dir.path(), false, None);
+    let node = spawn(&app, "User");
+    let host = rune(&app);
+    host.attach(node, "user.rn").unwrap();
+    assert_eq!(host.number_field(node, "out"), Some(45.0));
+}
+
+#[test]
+fn a_mounted_constant_holds_a_list_or_a_table() {
+    let dir = project(&[
+        (
+            "addons/kit/data.rn",
+            "pub const SCENARIOS = [\"boot\", \"menu\"];\n\
+             pub const DELAYS = #{ \"slow\": 4, \"fast\": 1 };\n\
+             pub const NESTED = [#{ \"name\": \"a\", \"steps\": [1, 2] }];\n",
+        ),
+        (
+            "user.rn",
+            "pub fn init(this) {\n\
+             \x20   this.second = kit::data::SCENARIOS[1];\n\
+             \x20   this.slow = kit::data::DELAYS[\"slow\"] as f64;\n\
+             \x20   this.step = kit::data::NESTED[0][\"steps\"][1] as f64;\n\
+             }\n",
+        ),
+    ]);
+    let app = app_in(dir.path(), false, None);
+    let node = spawn(&app, "User");
+    let host = rune(&app);
+    host.attach(node, "user.rn").unwrap();
+    assert_eq!(host.text_field(node, "second").as_deref(), Some("menu"));
+    assert_eq!(host.number_field(node, "slow"), Some(4.0));
+    assert_eq!(host.number_field(node, "step"), Some(2.0));
+}

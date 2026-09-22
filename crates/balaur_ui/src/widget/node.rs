@@ -76,6 +76,9 @@ pub struct Widget {
     /// Method called with the 1-based line a click on the gutter landed on.
     pub on_gutter: SmolStr,
     pub clicked: bool,
+    /// True for the one frame a `field` was submitted, as `clicked` is for the
+    /// frame a button was pressed.
+    pub submitted: bool,
     /// Space inside a container's edge, in design pixels.
     /// Space inside a container's edge: left, top, right and bottom, in
     /// design pixels. Below zero on every side takes the theme's.
@@ -124,6 +127,9 @@ pub struct Widget {
     /// Whether text breaks to the width it was given rather than running past
     /// it on one line.
     pub wrap: bool,
+    /// Cut a caption too long for its box and end it with an ellipsis. A
+    /// box it has: `width`, or the one a `grow` child was given.
+    pub truncate: bool,
     /// A menu row that leaves the menu open when clicked, as a toggle does.
     pub keep_open: bool,
     /// Text against a button's far edge: a shortcut, or a menu's caret.
@@ -238,6 +244,9 @@ pub struct Widget {
     pub tooltip: SmolStr,
     /// A glyph from the theme's icon family, drawn before `text`.
     pub icon: SmolStr,
+    /// The ink that glyph is tinted with, as `#rrggbb` or a name from the
+    /// theme's `[colors]`; empty takes the role's own.
+    pub icon_color: SmolStr,
     /// Greyed out, and deaf to clicks.
     pub disabled: bool,
     /// A fill and an outline this one widget states, as `#rrggbb` or a name
@@ -251,7 +260,9 @@ pub struct Widget {
     /// The air either side of a caption; below zero takes the theme's.
     pub padding_x: f32,
     /// Keep a root clear of what a notch or a home bar covers.
-    pub safe_area: bool,
+    /// Which edges this root keeps clear of the display's insets, left, top,
+    /// right then bottom, the order an `inset` is spelled in.
+    pub safe_area: [bool; 4],
     /// The widget as it was authored, kept only when it carries a class
     /// table, so a rotation can resolve it again. `None` is the common case
     /// and costs nothing.
@@ -339,6 +350,10 @@ pub struct UiFocus {
     /// Set by `focus_next` and friends and consumed by the next draw, so a
     /// script can move focus outside the pass that will act on it.
     pub pending: Option<Move>,
+    /// Whether focus was just put somewhere rather than merely resting there.
+    /// The draw consumes it to put the caret in a field, which is what a
+    /// command palette opening needs and what no property can say.
+    pub taking: bool,
 }
 
 /// What a script or the keyboard asked focus to do.

@@ -256,13 +256,17 @@ mod backend {
     use kiss3d::resource::{GpuMesh2d, GpuMesh3d, Texture, TextureManager};
     use kiss3d::wgpu;
 
-    /// One name for the atlas: it is written in place when it grows, so a
-    /// second texture never has to be made for it.
+    /// The atlas's name carries its side: a texture manager hands back what
+    /// it already holds under a name, so a grown atlas needs a new one or the
+    /// write overruns the texture made for the smaller side.
     const ATLAS: &str = "balaur text atlas";
 
     thread_local! {
         /// The atlas revision the texture was last written from.
         static UPLOADED: std::cell::Cell<u64> = const { std::cell::Cell::new(u64::MAX) };
+        /// The side it was made at: the atlas doubles as it fills, and a
+        /// write of the bigger image into the smaller texture is an error.
+        static MADE_AT: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
     }
 
     /// The atlas as a texture, uploaded when the shaper has drawn into it
@@ -272,11 +276,15 @@ mod backend {
         let state = state.borrow();
         let atlas = state.atlas();
         let side = atlas.side() as u32;
+        let grown = MADE_AT.with(std::cell::Cell::get) != side;
+        let name = format!("{ATLAS} {side}");
         let texture = TextureManager::get_global_manager(|tm| {
-            tm.get(ATLAS).unwrap_or_else(|| {
+            let held = if grown { None } else { tm.get(&name) };
+            held.unwrap_or_else(|| {
                 let blank = image::DynamicImage::new_rgba8(side, side);
                 UPLOADED.with(|at| at.set(u64::MAX));
-                tm.add_image(blank, ATLAS)
+                MADE_AT.with(|at| at.set(side));
+                tm.add_image(blank, &name)
             })
         });
         if UPLOADED.with(std::cell::Cell::get) != atlas.revision() {
@@ -348,6 +356,8 @@ mod backend {
             weight: style.weight,
             italic: style.italic,
             width: style.max_width,
+            // World text wraps to its block; nothing cuts it to one line.
+            truncate: false,
             align: match style.align {
                 super::Align::Start => ShaperAlign::Start,
                 super::Align::Center => ShaperAlign::Center,

@@ -37,6 +37,9 @@ pub(crate) struct Context {
     pub bases: BTreeSet<String>,
     /// Signals, so `sig.emit(x)` and `sig.connect(f)` are known to be signals.
     pub signals: BTreeSet<String>,
+    /// How many values a signal carries: a handler connected to one is
+    /// called with that many, whatever its own defaults say.
+    pub signal_arity: BTreeMap<String, usize>,
     /// Functions the async pass found, so a call to one gets `.await`.
     pub asyncs: BTreeSet<String>,
     /// A GDScript name that had to change, so calls reach the new one.
@@ -52,6 +55,9 @@ pub(crate) struct Context {
     /// Another class's `static var`s: its file, the store's key prefix, and
     /// each var's Rune default, so `Class.var` reads and writes that store.
     pub class_statics: BTreeMap<String, (String, BTreeMap<String, String>)>,
+    /// Every function another class declares: `Codec.decode` handed over as a
+    /// callable is that function, not a constant to read.
+    pub class_methods: BTreeMap<String, BTreeSet<String>>,
     /// Each function's parameter defaults as GDScript text, so a call that
     /// leaves them out passes them: a Rune function takes every argument.
     pub param_defaults: BTreeMap<String, Vec<Option<String>>>,
@@ -132,7 +138,12 @@ pub(crate) struct Emitter<'a> {
     /// Set when the body reached a shim call, so the caller binds `gd`.
     pub uses_shim: bool,
     /// Signal name to handler for each cross-script `connect`.
-    pub forwarders: BTreeMap<String, String>,
+    /// Signal to the handler it forwards to, and whether the handler runs
+    /// only when the node hid, which is what Godot's `hidden` means.
+    pub forwarders: BTreeMap<String, (String, bool)>,
+    /// How many values the signal a handler is being connected to carries,
+    /// while that connect is being written.
+    pub wanted_args: Option<usize>,
     /// False inside a hook the engine calls synchronously, where a wait
     /// cannot be emitted at all.
     pub allow_await: bool,
@@ -161,6 +172,7 @@ impl<'a> Emitter<'a> {
             awaits: false,
             uses_shim: false,
             forwarders: BTreeMap::new(),
+            wanted_args: None,
             allow_await: true,
             in_static: false,
             bool_locals: BTreeSet::new(),
@@ -639,9 +651,18 @@ impl<'a> Emitter<'a> {
             if let Some(module) = self.context.inner.get(&format!("{class}.{field}")) {
                 return format!("script::require({})", quoted(module));
             }
-            // A constant another module computes is a function there.
             if self.context.classes.contains_key(class) {
                 let module = self.class_module(class);
+                // Another class's function handed over as a callable.
+                if self
+                    .context
+                    .class_methods
+                    .get(class)
+                    .is_some_and(|names| names.contains(field))
+                {
+                    return format!("{module}.{}", safe(field));
+                }
+                // A constant another module computes is a function there.
                 self.uses_shim = true;
                 return format!("(gd.constant)({module}.{})", safe(field));
             }

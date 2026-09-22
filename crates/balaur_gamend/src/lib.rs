@@ -645,7 +645,7 @@ fn event_value(event: GamendEvent) -> Value {
             ("kind".into(), Value::Str("reopened".into())),
             (
                 "lost".into(),
-                Value::List(lost.into_iter().map(Value::Str).collect()),
+                Value::List(lost.into_iter().map(Value::text).collect()),
             ),
         ],
     };
@@ -706,7 +706,10 @@ fn handler_of(node: &Value, opts: Option<&Value>, default_method: &str) -> Resul
         Some(other) => return Err(anyhow!("`on_event` should be a method name, got {other:?}")),
         None => default_method.to_string(),
     };
-    Ok(Some(Handler { node, method }))
+    Ok(Some(Handler {
+        node,
+        method: method.clone(),
+    }))
 }
 
 fn credentials_of(spec: &Value) -> Result<LoginCredentials> {
@@ -715,10 +718,15 @@ fn credentials_of(spec: &Value) -> Result<LoginCredentials> {
         _ => None,
     };
     if let Some(device_id) = field("device_id") {
-        return Ok(LoginCredentials::Device { device_id });
+        return Ok(LoginCredentials::Device {
+            device_id: device_id.clone(),
+        });
     }
     match (field("email"), field("password")) {
-        (Some(email), Some(password)) => Ok(LoginCredentials::EmailPassword { email, password }),
+        (Some(email), Some(password)) => Ok(LoginCredentials::EmailPassword {
+            email: email.clone(),
+            password: password.clone(),
+        }),
         _ => Err(anyhow!(
             "credentials need `device_id`, or `email` and `password`"
         )),
@@ -732,8 +740,8 @@ fn account_of(spec: &Value) -> Result<LoginCredentials> {
     };
     match (field("email"), field("password")) {
         (Some(email), Some(password)) => Ok(LoginCredentials::Register {
-            email,
-            password,
+            email: email.clone(),
+            password: password.clone(),
             username: field("username"),
         }),
         _ => Err(anyhow!("an account needs an `email` and a `password`")),

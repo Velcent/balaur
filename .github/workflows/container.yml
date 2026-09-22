@@ -1,0 +1,103 @@
+# The engine as a container image, published to GHCR. See docker/README.md.
+#
+# `main` refreshes `:nightly`, a `v*` tag publishes `:<version>` and `:latest`.
+name: container
+
+on:
+  workflow_call:
+
+jobs:
+  container:
+    name: engine container
+    # A pull request builds the image to prove the Dockerfile still works, but
+    # only a push publishes one. Same rule build.yml applies to releases.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+
+      # `balaur-<target>` is the artifact; `balaur-editor-<target>.tar.gz` is
+      # the file inside it. Matching the file's name found nothing, silently.
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: balaur-linux-*
+          path: artifacts
+          merge-multiple: true
+
+      # Docker says amd64/arm64; the tarballs say x64/arm64. Laying them out
+      # under docker's spelling keeps the Dockerfile free of the mapping.
+      - name: Lay the binaries out by docker's architecture names
+        run: |
+          set -euo pipefail
+          for pair in "amd64:x64" "arm64:arm64"; do
+            docker_arch="${pair%%:*}"
+            balaur_arch="${pair##*:}"
+            tarball="artifacts/balaur-editor-linux-${balaur_arch}.tar.gz"
+
+            test -f "$tarball" || { echo "missing $tarball" >&2; exit 1; }
+
+            mkdir -p "docker/dist/linux-${docker_arch}"
+            tar -xzf "$tarball" -C "docker/dist/linux-${docker_arch}" \
+              --strip-components=1 "balaur-editor-linux-${balaur_arch}/balaur"
+          done
+
+      # The image runs `balaur --version` as its last build step, so building
+      # the arm64 layer on an amd64 runner needs emulation.
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Work out the tags
+        id: tags
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/balaur"
+
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            version="${GITHUB_REF#refs/tags/}"
+            echo "engine=${image}:${version},${image}:latest" >>"$GITHUB_OUTPUT"
+            echo "android=${image}:${version}-android,${image}:latest-android" >>"$GITHUB_OUTPUT"
+          else
+            echo "engine=${image}:nightly" >>"$GITHUB_OUTPUT"
+            echo "android=${image}:nightly-android" >>"$GITHUB_OUTPUT"
+          fi
+
+      - if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: The engine
+        uses: docker/build-push-action@v7
+        with:
+          context: docker
+          file: docker/Dockerfile
+          target: engine
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name == 'push' }}
+          tags: ${{ steps.tags.outputs.engine }}
+          provenance: false
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.description=The Balaur engine, for exporting a project in CI
+            org.opencontainers.image.licenses=MIT
+
+      # arm64 too: the two x86-64-only build-tools run under qemu. The
+      # Dockerfile's `aapt2 version` check is what catches that breaking.
+      - name: The engine plus the Android SDK
+        uses: docker/build-push-action@v7
+        with:
+          context: docker
+          file: docker/Dockerfile
+          target: android
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name == 'push' }}
+          tags: ${{ steps.tags.outputs.android }}
+          provenance: false
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.description=The Balaur engine with the Android SDK, for exporting a project in CI
+            org.opencontainers.image.licenses=MIT

@@ -14,6 +14,7 @@
 
 mod api;
 mod bindings;
+mod cache;
 mod context;
 mod debugger;
 mod handles;
@@ -114,6 +115,11 @@ enum Purpose {
 /// rest cover a script that re-enters itself through a host binding before
 /// returning.
 const VM_POOL: usize = 4;
+
+/// The function a script declares to say what its members start as. The host
+/// calls it when the instance is made, so a sibling's `init` reading this
+/// script's state finds what it was declared with.
+const DEFAULTS: &str = "defaults";
 
 use crate::script::{Instance, Method, Script};
 
@@ -392,7 +398,19 @@ impl RuneHost {
             script
         } else {
             let source = self.source_of(key)?;
-            let (unit, sources) = self.compile_unit(key, &source, Purpose::Dev)?;
+            // Filed under the outcome, so `--timings` says which of the two
+            // a boot paid for rather than how long it spent asking.
+            let cached = balaur_core::timings::boot_hit("scripts/cached", || {
+                cache::load(self, key, &source)
+            });
+            let (unit, sources) = match cached {
+                Some(hit) => (Arc::new(hit.unit), hit.sources),
+                None => balaur_core::timings::boot("scripts/compiled", || {
+                    let (unit, sources) = self.compile_unit(key, &source, Purpose::Dev)?;
+                    cache::store(self, key, &source, &unit, &sources);
+                    Ok::<_, anyhow::Error>((unit, sources))
+                })?,
+            };
             let deps = self.source_keys(&sources);
             Script::new(Rc::from(key), unit, source, sources, deps)
         };
@@ -523,57 +541,8 @@ impl RuneHost {
                 id: entity.to_bits().get(),
             })?,
         )?;
-        let declared = self.exports(&key)?;
-        for (name, spec) in &declared {
-            obj.insert(
-                rune::alloc::String::try_from(name.as_str())?,
-                value::from_neutral(&inspect::export_default(spec))?,
-            )?;
-        }
-        for (name, value) in props {
-            if !declared.iter().any(|(d, _)| d == name) {
-                tracing::warn!("[{key}] property '{name}' is set on a node but not exported");
-            }
-            obj.insert(
-                rune::alloc::String::try_from(name.as_str())?,
-                value::from_neutral(value)?,
-            )?;
-        }
-        // A `node` export arrives as the node its path names, relative to this
-        // one, or nil: what a Godot `@export var x: Node` holds. One naming a
-        // `component` arrives as that node's handle for it.
-        for (name, spec) in declared
-            .iter()
-            .filter(|(_, spec)| inspect::is_node_export(spec))
-        {
-            let path = props
-                .iter()
-                .find(|(n, _)| n == name)
-                .map_or_else(|| inspect::export_default(spec), |(_, v)| v.clone());
-            // A list export takes each of its paths the same way.
-            if inspect::is_node_list(spec) {
-                let balaur_script::Value::List(paths) = path else {
-                    continue;
-                };
-                let mut found = Vec::new();
-                for path in &paths {
-                    let balaur_script::Value::Str(path) = path else {
-                        continue;
-                    };
-                    found.push(self.node_prop(entity, &key, name, path, spec)?);
-                }
-                obj.insert(
-                    rune::alloc::String::try_from(name.as_str())?,
-                    rune::to_value(found)?,
-                )?;
-                continue;
-            }
-            let balaur_script::Value::Str(path) = path else {
-                continue;
-            };
-            let resolved = self.node_prop(entity, &key, name, &path, spec)?;
-            obj.insert(rune::alloc::String::try_from(name.as_str())?, resolved)?;
-        }
+        // A member starts as the script declared it, before the scene's
+        // exported values land on top, which is Godot's own order.
         let state = rune::to_value(obj)?;
         let shared = self.shared_key(&key);
         self.state.borrow_mut().instances.insert(
@@ -583,6 +552,35 @@ impl RuneHost {
                 state: state.try_clone()?,
             },
         );
+        if self.resolve(&key, DEFAULTS).is_some() {
+            self.invoke(entity, &key, DEFAULTS, (state.try_clone()?,), false, None);
+        }
+        let mut obj = state.borrow_mut::<rune::runtime::Object>()?;
+        let declared = self.exports(&key)?;
+        // Each export as the spec governing it says: a `node` path arrives as
+        // the node it names, which is what a Godot `@export var x: Node`
+        // holds, and a composite is walked to whatever depth it declares.
+        for (name, spec) in &declared {
+            let value = props
+                .iter()
+                .find(|(prop, _)| prop == name)
+                .map_or_else(|| inspect::export_default(spec), |(_, v)| v.clone());
+            obj.insert(
+                rune::alloc::String::try_from(name.as_str())?,
+                self.export_value(entity, &key, name, spec, &value)?,
+            )?;
+        }
+        for (name, value) in props {
+            if declared.iter().any(|(d, _)| d == name) {
+                continue;
+            }
+            tracing::warn!("[{key}] property '{name}' is set on a node but not exported");
+            obj.insert(
+                rune::alloc::String::try_from(name.as_str())?,
+                value::from_neutral(value)?,
+            )?;
+        }
+        drop(obj);
         self.engine
             .world_mut()
             .insert_one(entity, ScriptAttachment { path: key.clone() })
@@ -758,6 +756,7 @@ impl RuneHost {
             return Ok(());
         }
         let (unit, sources) = self.compile_unit(key, &source, Purpose::Dev)?;
+        cache::store(self, key, &source, &unit, &sources);
         let deps = self.source_keys(&sources);
         let paused = {
             let mut state = self.state.borrow_mut();
@@ -868,13 +867,6 @@ impl RuneHost {
                 continue;
             };
             let name = rune::alloc::String::try_from(declared.name.as_str())?;
-            // Past the five parameters a native trampoline takes, the function
-            // itself: callable from any unit, though a reload reaches it only
-            // through the module and not through a copy a caller kept.
-            if declared.arity > crate::shared::MOST_ARGS {
-                object.insert(name, rune::to_value(function)?)?;
-                continue;
-            }
             let slot = SHARED_FNS.with(|shared| {
                 let mut shared = shared.borrow_mut();
                 if let Some(slot) = spare.pop() {
@@ -886,10 +878,7 @@ impl RuneHost {
                 }
             });
             let label = format!("{key}: {}", declared.name);
-            let Some(wrapper) = trampoline(slot, declared.arity, &label) else {
-                spare.push(slot);
-                continue;
-            };
+            let wrapper = trampoline(slot, Some(declared.arity), &label);
             held.push(slot);
             object.insert(name, rune::to_value(wrapper)?)?;
         }

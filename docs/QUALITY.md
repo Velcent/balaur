@@ -33,8 +33,9 @@ with `rustfmt` and `clippy`, so every machine runs one linter version.
 
 ## House rules no compiler enforces
 
-`scripts/house_lints.py` walks every `.rs` and `.rn`. **ERROR** fails CI and is
-mechanical; **REPORT** prints only.
+`scripts/house_lints.py` walks every `.rs` and `.rn`, and reads
+`scripts/showcase.sh`. **ERROR** fails CI and is mechanical; **REPORT** prints
+only.
 
 | Rule | Fails on |
 | --- | --- |
@@ -47,6 +48,7 @@ mechanical; **REPORT** prints only.
 | `todo-without-issue` | a TODO or FIXME with no issue |
 | `fn-too-long`, `file-too-long` | 120 lines, 1200 lines |
 | `comment-too-long`, `comment-restates-name` | comment blocks, and comments that restate the line below |
+| `showcase-milestone` | a picture `scripts/showcase.sh` takes and files under no milestone, or a milestone naming a take that is gone |
 | `det-prefix-misuse`, `dimension-casing`, `dimension-snake`, `install-verb`, `system-verb`, `engine-param-name`, `resource-suffix`, `new-resource-type`, `fn-suffix-on-struct`, `pub-inner`, `component-registration-doc` | the mechanical half of `docs/NAMING.md` |
 | `rune-short-circuit`, `rune-rebound-let` | two Rune shapes that compile and then misbehave (`AGENTS.md`) |
 | `std-fs`, `is-absolute` | `std::fs` and `Path::is_absolute` in engine crates, which the web build has no disk for; `files::backend` and `files::rooted` are the substitutes |
@@ -83,6 +85,7 @@ fails if that file is stale.
 | `abbreviation` | `str`, `cfg`, `buf`, `idx`, `pos` where a user reads them |
 | `module-plural` | a plural module that is not a keyed store |
 | `schema-vocabulary` | a schema departing from the closed set — the discriminant is `kind`, the meta key is `type` |
+| `vocabulary-literal` | a params key spelled at a call site in a crate that keeps a `vocabulary.rs` |
 | `module-undocumented`, `function-undocumented`, `component-undocumented`, `asset-undocumented` | anything the generated reference could not describe |
 | `describes-nothing` | a doc entry for a function no longer registered |
 | `acts-on-unknown` | a function documented as acting on a component nobody registers |
@@ -131,7 +134,7 @@ three desktop platforms. Beyond `cargo test --workspace`:
 
 ## End to end, over every example
 
-`scripts/e2e.sh` runs each of the twelve examples thirty-six ways, on three
+`scripts/e2e.sh` runs each of the twelve examples thirty-eight ways, on three
 platforms:
 
 - **check** — every script a scene attaches, compiled, plus the handle calls
@@ -150,6 +153,11 @@ platforms:
   `script paths`, `assets`, `picking`, `props`, `instances`, `placing`,
   `timings`, `session`, `theme`, `selection`, `drag-in`, `events`, `library`,
   `rows`, `pen`.
+- **render**, twice — the game and the editor surface-less on a real GPU,
+  which is where a texture the backend cannot bind or a shader it rejects
+  warns. The step reads the `rendering ... offscreen` line back, so a binary
+  built without `--features window` fails rather than repeating the headless
+  run.
 
 Two bars: **a clean exit and a clean log.** A logged `ERROR` or `WARN` fails,
 bar a warning a self-test names first with `expect_warning`. The editor's
@@ -157,10 +165,10 @@ bar a warning a self-test names first with `expect_warning`. The editor's
 nodes silently had no ref, so no inspector, no gizmo, no transform read, and
 nothing else failed.
 
-Headless covers loading, mirroring, node resolution and asset rebinding, not
-drawing. `scripts/uiaudit.sh` covers drawing: one PNG per editor screen,
-offscreen, catalogued in `docs/EDITOR-SCREENS.md`. Regenerate and diff before
-reviewing a shell change.
+Headless covers loading, mirroring, node resolution and asset rebinding; the
+render steps cover what drawing reports. What a screen looks like is
+`scripts/uiaudit.sh`: one PNG per editor screen, offscreen, catalogued in
+`docs/EDITOR-SCREENS.md`. Regenerate and diff before reviewing a shell change.
 
 ## Documentation cannot drift
 
@@ -198,6 +206,15 @@ ignored.
 
 `scripts/bench_compare.py` writes `docs/BENCHMARKS.md` from a real run, case for
 case against Godot with Rapier, Box2D v3 and Jolt.
+
+`scripts/bench_load.py` asks a different question: what one kind of node, or
+one shape of script, costs a frame. Each case is N of one thing under
+`examples/benchmark`, built once and then measured as it sits, and the table
+says where the frame went — the script, the mirror, the UI pass, the
+renderer's two halves. It reports instructions a node beside the
+milliseconds, because that number is the same on every machine and the
+milliseconds are not. Run on demand, never in CI, and add a case by writing
+one entry in `cases_kinds.rn` or `cases_scripts.rn`.
 
 ## Supply chain and releases
 

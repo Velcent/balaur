@@ -4,10 +4,87 @@
 # scripted sequence and `frames=` captures it every other frame; ffmpeg turns
 # a frame directory into a .webm and an .mp4 with the first frame as poster.
 # Needs a GPU and ffmpeg.
-#   scripts/showcase.sh [website-dir] [name...]
+#   scripts/showcase.sh [--milestone 0.2] [website-dir] [name...]
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# Which milestone each take's subject shipped in, off docs/ROADMAP.md, so
+# `--milestone 0.2` retakes that column alone. house_lints.py holds both ways.
+milestones="
+0.1 editor_overview
+0.1 scenes_tree
+0.1 scripting_editor
+0.1 hello_open
+0.1 persona_scene
+0.1 persona_script
+0.1 persona_animate
+0.1 persona_physics
+0.1 persona_interface
+0.1 editor_selection
+0.1 editor_events
+0.1 editor_cost
+0.1 editor_profiler
+0.1 editor_lights
+0.1 editor_assets
+0.1 physics_overlays
+0.1 physics_collapse
+0.1 networking_faults
+0.1 save_settings
+0.1 locale_settings
+0.1 sprite_inspector
+0.1 export_sheet
+0.1 extensions_greeter
+0.1 example_rig3d
+0.1 example_c_counter
+0.1 scenes_inspect
+0.1 scripting_live
+0.1 animation_key
+0.1 input_overlay
+0.1 determinism_replay
+0.1 shader_preview
+0.1 objects
+0.1 tiles_overview
+0.1 touch_controls
+0.1 script_completion
+0.1 ui_widgets
+0.1 rigging_weights
+0.1 rigging_bonemap
+0.1 rigging_modifiers
+0.2 project_manager
+0.2 project_examples
+0.2 project_start
+0.2 engine_versions
+0.2 about_balaur
+0.2 covers
+0.2 editor_focus
+0.2 script_focus
+0.2 editor_import
+0.2 import_async
+0.2 addon_completion
+0.2 godot_import
+0.2 concave_pieces
+0.2 concave_beam
+0.2 pause_states
+0.2 ui_kinds
+0.2 ui_rows
+0.2 ui_menus
+0.2 ui_text
+0.2 ui_tour
+0.2 log_settings
+"
+
+milestone_of() { # milestone_of <name>: the milestone it is filed under, or ""
+  printf '%s\n' "$milestones" | awk -v n="$1" '$2 == n { print $1; exit }'
+}
+
+only_at=""
+while [ $# -gt 0 ]; do
+  case $1 in
+    --milestone) only_at=${2:-}; shift 2 ;;
+    --milestone=*) only_at=${1#*=}; shift ;;
+    *) break ;;
+  esac
+done
 site=${1:-../balaur-website}
 shift || true
 only=("$@")
@@ -15,6 +92,12 @@ img="$site/static/img/manual"
 vid="$site/static/video"
 work=target/showcase
 mkdir -p "$img" "$vid" "$work"
+# Where the editor keeps its own files. `convert:` reads a folder from here,
+# because it is the one directory outside a project the editor may reach.
+case "$(uname -s)" in
+  Darwin) data="$HOME/Library/Application Support/balaur/balaur-editor" ;;
+  *) data="${XDG_DATA_HOME:-$HOME/.local/share}/balaur/balaur-editor" ;;
+esac
 
 command -v ffmpeg >/dev/null || { echo "ffmpeg is needed (brew install ffmpeg)" >&2; exit 1; }
 # BALAUR_BIN names a built editor binary to use instead of building one.
@@ -25,9 +108,12 @@ fi
 balaur() { "$BALAUR_BIN" "$@"; }
 failed=()
 
-wanted() { # wanted <name>: true when no names were given or this one was
+wanted() { # wanted <name>: true when the name and milestone filters allow it
+  local at n
+  at=$(milestone_of "$1")
+  [ -n "$at" ] || { echo "showcase: $1 is filed under no milestone" >&2; exit 2; }
+  [ -n "$only_at" ] && [ "$at" != "$only_at" ] && return 1
   [ ${#only[@]} -eq 0 ] && return 0
-  local n
   for n in "${only[@]}"; do [ "$n" = "$1" ] && return 0; done
   return 1
 }
@@ -66,15 +152,12 @@ shot() { # shot <name> <project> <state>
   echo ok
 }
 
-# A shot of an import, which leaves the files it wrote in the project it
-# landed in: `reset_examples` puts scenes back, not those.
-import_shot() { # import_shot <name> <project> <state> <file>...
-  local name=$1 project=$2 state=$3 list=""
-  shift 3
+# An import leaves the files it wrote in the project it landed in, and
+# `reset_examples` puts scenes back, not those.
+import_clean() { # import_clean <project> <file>...
+  local project=$1
+  shift
   local file stem
-  # One a frame, so the picture catches them at different stages.
-  for file in "$@"; do list="$list$file;"; done
-  shot "$name" "$project" "imports:${list%;},$state"
   for file in "$@"; do
     stem=$(basename "$file"); stem=${stem%.*}
     # The page and its import settings, the sheet, the clips, the model and
@@ -86,6 +169,48 @@ import_shot() { # import_shot <name> <project> <state> <file>...
   done
   rmdir "$project/art" "$project/sheets" "$project/animations" \
     "$project/models" 2>/dev/null || true
+}
+
+# The `imports:` state takes the files semicolon separated, one starting a
+# frame, so a take catches them at different stages.
+import_list() { # import_list <file>...
+  local file list=""
+  for file in "$@"; do list="$list$file;"; done
+  printf '%s' "${list%;}"
+}
+
+import_shot() { # import_shot <name> <project> <state> <file>...
+  local name=$1 project=$2 state=$3
+  shift 3
+  shot "$name" "$project" "imports:$(import_list "$@"),$state"
+  import_clean "$project" "$@"
+}
+
+import_clip() { # import_clip <name> <project> <frames> <state> <file>...
+  local name=$1 project=$2 frames=$3 state=$4
+  shift 4
+  clip "$name" "$project" "$frames" "imports:$(import_list "$@"),$state"
+  import_clean "$project" "$@"
+}
+
+# The start screen converting another engine's project. GODOT_PROJECT names
+# the folder, and without one the take is skipped: no checkout carries it.
+godot_clip() { # godot_clip <name> <frames>
+  wanted "$1" || return 0
+  local src=${GODOT_PROJECT:-}
+  if [ -z "$src" ] || [ ! -f "$src/project.godot" ]; then
+    printf '%-22s clip   skipped: GODOT_PROJECT names no Godot project\n' "$1"
+    return 0
+  fi
+  # Copied into the editor's data directory, the one folder outside its own
+  # project that `convert:` may reach; the name is what the screen says.
+  local into="$data/$(basename "$src")"
+  rm -rf "$into" "$into-balaur"
+  mkdir -p "$into"
+  rsync -a --exclude .git --exclude .godot --exclude .cache --exclude 'store_*' \
+    --exclude export --exclude packs --exclude docs "$src/" "$into/"
+  clip "$1" examples/hello "$2" "manager,show:godot,convert:$into"
+  rm -rf "$into" "$into-balaur"
 }
 
 # A running project's own window, for an example whose subject is its screen
@@ -128,17 +253,26 @@ scene_shot() { # scene_shot <name> <project> <scene> <width> <height>
 
 # A running project's own screen over time: the scene's `frames` prop names
 # the directory, and the project writes one picture a frame into it.
-screen_clip() { # screen_clip <name> <project> <frames>
+screen_clip() { # screen_clip <name> <project> <frames> [width height [scale]]
   wanted "$1" || return 0
   printf '%-22s clip   ' "$1"
   rm -rf "$work/$1"
   mkdir -p "$work/$1"
   local scene=$2/scenes/main.toml
-  local held
+  local proj=$2/project.toml
+  local held settings=""
   held=$(cat "$scene")
+  # A size given here rather than in `project.toml`, which may not carry a
+  # second `[window]`; the scale is the design pixel, 960 filling 1920 at 2.0.
+  if [ -n "${4:-}" ]; then
+    settings=$(cat "$proj")
+    printf '%s\n[window]\nwidth = %d\nheight = %d\n\n[ui]\nscale = %s\n' \
+      "$settings" "$4" "$5" "${6:-1.0}" >"$proj"
+  fi
   printf '%s\n' "${held//frames = \"\"/frames = \"$PWD/$work/$1\"}" >"$scene"
   balaur run "$2" --offscreen --frames "$3" >"$work/$1.log" 2>&1 || true
   printf '%s\n' "$held" >"$scene"
+  [ -n "$settings" ] && printf '%s\n' "$settings" >"$proj"
   # Any frame will do: a project may well skip the first, which is drawn
   # before its scene is.
   if grep -q ERROR "$work/$1.log" || ! ls "$work/$1"/*.png >/dev/null 2>&1; then failed "$1"; return 0; fi
@@ -222,6 +356,7 @@ screen concave_pieces  examples/concave    120
 # Pause, process modes and the time scale over eight seconds: the boxes fall,
 # freeze, and fall again at a quarter speed while the `always` heading and
 # marker keep going. Its poster lands inside the paused stretch.
+screen_clip ui_tour     examples/interface 380 1920 1080 2.0
 screen_clip pause_states examples/pause 245
 # The same scene over its first four seconds: the beam inside the grown
 # table is pushed out, the one inside the plain table is not.
@@ -229,14 +364,13 @@ screen_clip concave_beam examples/concave  130
 shot tiles_overview    examples/tiles      "scene,select:Ground,tool:tiles,dock:tiles,zoom:60"
 shot scenes_tree       examples/hello      "scene,select:Platform"
 shot scripting_editor  examples/hello      "script,select:Spinner"
-# The completion popup, and the Docs dock the reference is rendered into.
+# The completion popup, along the project's own scripts.
 shot script_completion examples/hello      "script,select:Spinner,show:completion"
 # The same popup along a mounted addon's path: hello with the Gamend SDK in.
 addon_hello=$work/addon_hello
 rm -rf "$addon_hello" && cp -R examples/hello "$addon_hello"
 cp -R editor/library/addons "$addon_hello/addons"
 shot addon_completion "$addon_hello"   "script,select:Spinner,show:addon_completion"
-shot script_docs       examples/hello      "script,select:Spinner,dock:docs"
 # Focus: the code pane with the window to itself, beside its hooks list.
 shot editor_focus      examples/hello      "script,select:Spinner,focus"
 shot ui_widgets        examples/angrynerds "ui,select:Restart,play"
@@ -293,7 +427,6 @@ shot export_sheet      examples/angrynerds "scene,export"
 shot extensions_greeter examples/extension_greeter "scene"
 # Stills for the website's examples page.
 shot example_rig3d      examples/rig3d      "scene"
-shot example_rig        examples/rig        "scene,select:Hero"
 shot example_c_counter  examples/extension_c_counter "scene"
 
 clip scenes_inspect    examples/hello      800  "show:scenes"
@@ -303,13 +436,20 @@ clip physics_collapse  examples/angrynerds 700  "show:physics"
 clip input_overlay     examples/hello      800  "show:input"
 # Its own recording should be the only row in the list it shows, and every
 # angrynerds take before it recorded one too.
-case "$(uname -s)" in
-  Darwin) data="$HOME/Library/Application Support/balaur/balaur-editor" ;;
-  *) data="${XDG_DATA_HOME:-$HOME/.local/share}/balaur/balaur-editor" ;;
-esac
 wanted determinism_replay && rm -rf "$data/sessions/angrynerds"
 clip determinism_replay examples/angrynerds 1120 "show:determinism"
 clip shader_preview    examples/shaders    1160 "show:shaders"
+clip script_focus      examples/hello      640  "show:focus"
+clip project_start     examples/hello      600  "show:manager"
+# The take ends part way: a project of this size is half a minute of importing,
+# and the clip runs at the rate it really goes rather than being sped up.
+godot_clip godot_import 840
+# Four files importing at once, the dock's list filling while the editor keeps
+# drawing: the whole point of the job that writes a few files a frame.
+import_clip import_async examples/angrynerds 620 "show:importing" \
+  crates/balaur_render/tests/fixtures/walk.aseprite examples/rig3d/models/column.glb \
+  crates/balaur_render/tests/fixtures/sprite_200x100.png \
+  crates/balaur_render/tests/fixtures/sprite_drawn.png
 
 if [ ${#failed[@]} -gt 0 ]; then
   echo "failed: ${failed[*]}" >&2

@@ -217,7 +217,7 @@ fn install_project_verbs(m: &mut dyn Bindings<Engine>) {
         }
         let state = eng.resource::<ProjectState>();
         state.borrow_mut().picked.clone_from(&picked);
-        Ok(picked.map_or(Value::Nil, Value::Str))
+        Ok(picked.map_or(Value::Nil, Value::text))
     });
 }
 
@@ -328,12 +328,12 @@ fn copy_example(home: &Path, id: &str, into: &Path) -> Value {
     if !from.join("project.toml").is_file() {
         return Value::Map(vec![(
             "error".into(),
-            Value::Str(format!("no example named {id}")),
+            Value::text(format!("no example named {id}")),
         )]);
     }
     let to = free_name(into, id);
     if let Err(e) = copy_tree(&from, &to) {
-        return Value::Map(vec![("error".into(), Value::Str(format!("{e:#}")))]);
+        return Value::Map(vec![("error".into(), Value::text(format!("{e:#}")))]);
     }
     let name = name_of(&to);
     remember(home, &to, &name);
@@ -569,7 +569,7 @@ fn templates() -> Vec<Value> {
 fn create(home: &Path, path: &Path, template: &str) -> Value {
     let template = (!template.is_empty()).then_some(template);
     if let Err(e) = crate::new_project::create(path, template) {
-        return Value::Map(vec![("error".into(), Value::Str(format!("{e:#}")))]);
+        return Value::Map(vec![("error".into(), Value::text(format!("{e:#}")))]);
     }
     let name = name_of(path);
     remember(home, path, &name);
@@ -625,7 +625,7 @@ fn open(eng: &Engine, home: &Path, path: &Path) -> Value {
     if !path.join("project.toml").is_file() {
         return Value::Map(vec![(
             "error".into(),
-            Value::Str(format!("no project.toml in {}", path.display())),
+            Value::text(format!("no project.toml in {}", path.display())),
         )]);
     }
     remember(home, path, &name_of(path));
@@ -634,7 +634,7 @@ fn open(eng: &Engine, home: &Path, path: &Path) -> Value {
             eng.request_quit();
             Value::Map(Vec::new())
         }
-        Err(e) => Value::Map(vec![("error".into(), Value::Str(format!("{e:#}")))]),
+        Err(e) => Value::Map(vec![("error".into(), Value::text(format!("{e:#}")))]),
     }
 }
 

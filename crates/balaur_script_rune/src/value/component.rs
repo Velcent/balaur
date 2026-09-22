@@ -24,7 +24,7 @@ use balaur_script::Value as Neutral;
 use rune::runtime::{InstAddress, Memory, Output, Protocol, VmError, VmResult};
 
 use super::{Node, from_neutral, to_neutral};
-use crate::bindings::{CallbackScope, bound_handle, call_bound, hold_node_fn};
+use crate::bindings::{CallbackScope, bound_handle, call_bound, hold_node_fn, with_engine};
 use crate::handles::{self, GENERIC, is_identifier};
 
 /// A component on a node, as scripts see it.
@@ -32,7 +32,14 @@ use crate::handles::{self, GENERIC, is_identifier};
 #[rune(item = ::balaur)]
 pub struct Component {
     pub(crate) node: u64,
-    pub(crate) name: String,
+    /// Interned by [`intern`], so a handle carries a borrow rather than a
+    /// string it would copy. Kept for the error messages and the method
+    /// path, which still dispatch on the name.
+    pub(crate) name: &'static str,
+    /// Where the component sits in the registry. Resolved once, when the
+    /// handle's field was installed, so reading a property costs neither a
+    /// hash of the name nor a `String` to carry it.
+    pub(crate) index: u32,
 }
 
 thread_local! {
@@ -41,7 +48,7 @@ thread_local! {
     static NAMES: RefCell<HashSet<&'static str>> = RefCell::new(HashSet::new());
 }
 
-fn intern(name: &str) -> &'static str {
+pub(crate) fn intern(name: &str) -> &'static str {
     NAMES.with_borrow_mut(|names| {
         if let Some(&existing) = names.get(name) {
             return existing;
@@ -62,9 +69,14 @@ pub(crate) fn install(m: &mut rune::Module, eng: &Engine) -> Result<(), rune::Co
             continue;
         }
         let name = intern(&component);
+        let Some(index) = balaur_core::components::index_of(eng, &component) else {
+            continue;
+        };
+        let index = index as u32;
         m.field_function(&Protocol::GET, name, move |node: &Node| Component {
             node: node.id,
-            name: name.to_string(),
+            name,
+            index,
         })?;
         // `node.meta = #{ ... }` describes the component whole, the scene
         // file's spelling; the handle's fields and index are the sparse one.
@@ -192,39 +204,47 @@ fn set_whole(node: Node, name: &'static str, handle: usize, value: &rune::Value)
 /// assigning goes through `patch_component`, so one property moves and the
 /// rest of the component stays where it was.
 fn property_fields(m: &mut rune::Module, eng: &Engine) -> Result<(), rune::ContextError> {
-    let (Some(read), Some(write)) = (node_op("get_component"), node_op("patch_component")) else {
+    let Some(read) = node_op("get_component") else {
         return Ok(());
     };
-    let read = hold_node_fn(eng.clone(), read);
-    let write = hold_node_fn(eng.clone(), write);
-    // Dispatch is by component name at call time, as the methods are: a
-    // property reads back as the `Vec3` the node's own accessors answer with
-    // where the schema says `vec3`, and as what it wrote otherwise.
+    // Held for its engine alone: a property read calls the registry straight,
+    // so nothing about it crosses the seam as a value.
+    let held = hold_node_fn(eng.clone(), read);
     let handles::Properties {
         owners,
         mut vectors,
         defaults,
     } = handles::properties(eng);
+    let index_of = |component: &str| balaur_core::components::index_of(eng, component);
+    // A handle knows its component by number, so the set a property belongs
+    // to is a bitmask: dispatch is a shift and a test, not a hash of a name.
+    let mask = |names: &HashSet<String>| {
+        names
+            .iter()
+            .filter_map(|c| index_of(c))
+            .fold(0u128, |bits, i| bits | (1u128 << i))
+    };
+    let slots = balaur_core::components::names(eng).len();
     for (prop, components) in owners {
         let name = intern(&prop);
-        let readers = components.clone();
-        let as_vector = vectors.remove(&prop).unwrap_or_default();
-        let fallback: std::collections::HashMap<String, Neutral> = readers
-            .iter()
-            .filter_map(|c| {
-                defaults
-                    .get(&(c.clone(), prop.clone()))
-                    .map(|v| (c.clone(), v.clone()))
-            })
-            .collect();
+        let owned = mask(&components);
+        let as_vector = mask(&vectors.remove(&prop).unwrap_or_default());
+        let mut fallback: Vec<Option<Neutral>> = vec![None; slots];
+        for component in &components {
+            if let Some(i) = index_of(component)
+                && let Some(value) = defaults.get(&(component.clone(), prop.clone()))
+            {
+                fallback[i] = Some(value.clone());
+            }
+        }
         m.field_function(&Protocol::GET, name, move |this: &Component| {
-            read_property(this, name, &readers, &as_vector, &fallback, read)
+            read_property(this, name, owned, as_vector, &fallback, held)
         })?;
         m.field_function(
             &Protocol::SET,
             name,
             move |this: &Component, value: rune::Value| {
-                write_property(this, name, &components, write, &value)
+                write_property(this, name, owned, held, &value)
             },
         )?;
     }
@@ -240,40 +260,50 @@ fn node_op(name: &str) -> Option<NodeOp> {
 
 /// The node and the component name every property call opens with.
 fn receiver(this: &Component) -> [Neutral; 2] {
-    [Neutral::Node(this.node), Neutral::Str(this.name.clone())]
+    [
+        Neutral::Node(this.node),
+        Neutral::Str(this.name.to_string()),
+    ]
 }
 
 fn read_property(
     this: &Component,
     prop: &'static str,
-    owners: &HashSet<String>,
-    vectors: &HashSet<String>,
-    fallback: &std::collections::HashMap<String, Neutral>,
-    handle: usize,
+    owners: u128,
+    vectors: u128,
+    fallback: &[Option<Neutral>],
+    held: usize,
 ) -> VmResult<rune::Value> {
-    if !owners.contains(&this.name) {
+    let bit = 1u128 << this.index;
+    if owners & bit == 0 {
         return fail(format!("`{}` has no property `{prop}`", this.name));
     }
     let _scope = CallbackScope::enter();
-    let got = match call_bound(handle, &receiver(this)) {
-        Some(Ok(v)) => v,
-        Some(Err(err)) => return fail(err),
-        None => return fail("component property was registered on another thread"),
+    let entity = match balaur_core::entity_of(balaur_script::NodeId(this.node)) {
+        Ok(entity) => entity,
+        Err(err) => return fail(err.to_string()),
     };
-    // A node that does not carry the component reads as the component's
-    // declared defaults: a scene leaving one out means exactly that, and a
-    // node with no `transform` does sit at its parent.
-    let value = match got {
-        Neutral::Map(props) => match props.into_iter().find(|(key, _)| key == prop) {
-            Some((_, value)) => value,
-            None => return fail(format!("`{}` does not report `{prop}`", this.name)),
-        },
-        _ => match fallback.get(&this.name) {
+    let index = this.index as usize;
+    // Straight to the registry with the number the handle already holds. The
+    // seam is what a script declares against; this is the backend's own sugar
+    // over operations core declared, as `NODE_OPS` above it is.
+    let Some(found) = with_engine(held, |eng| {
+        balaur_core::components::property_at(eng, entity, index, prop)
+            .as_ref()
+            .and_then(|value| balaur_core::node_api::from_toml(value).ok())
+    }) else {
+        return fail("component property was registered on another thread");
+    };
+    let value = match found {
+        Some(value) => value,
+        // No such property on this node: the component is absent, and a scene
+        // leaving one out means its declared defaults.
+        None => match fallback.get(index).and_then(Option::as_ref) {
             Some(value) => value.clone(),
             None => return fail(format!("the node has no `{}`", this.name)),
         },
     };
-    let value = if vectors.contains(&this.name) {
+    let value = if vectors & bit != 0 {
         as_vec3(value)
     } else {
         value
@@ -307,11 +337,11 @@ fn as_vec3(value: Neutral) -> Neutral {
 fn write_property(
     this: &Component,
     prop: &'static str,
-    owners: &HashSet<String>,
-    handle: usize,
+    owners: u128,
+    held: usize,
     value: &rune::Value,
 ) -> VmResult<()> {
-    if !owners.contains(&this.name) {
+    if owners & (1u128 << this.index) == 0 {
         return fail(format!("`{}` has no property `{prop}`", this.name));
     }
     let _scope = CallbackScope::enter();
@@ -319,11 +349,16 @@ fn write_property(
         Ok(v) => v,
         Err(err) => return fail(err),
     };
-    let [node, name] = receiver(this);
-    let args = [node, name, Neutral::Map(vec![(prop.to_string(), value)])];
-    match call_bound(handle, &args) {
-        Some(Ok(_)) => VmResult::Ok(()),
-        Some(Err(err)) => fail(err),
+    let entity = match balaur_core::entity_of(balaur_script::NodeId(this.node)) {
+        Ok(entity) => entity,
+        Err(err) => return fail(err.to_string()),
+    };
+    let index = this.index as usize;
+    match with_engine(held, |eng| {
+        balaur_core::node_api::set_property_at(eng, entity, index, prop, &value)
+    }) {
+        Some(Ok(())) => VmResult::Ok(()),
+        Some(Err(err)) => fail(format!("{err:#}")),
         None => fail("component property was registered on another thread"),
     }
 }
@@ -334,18 +369,21 @@ fn fail<T>(message: impl std::fmt::Display) -> VmResult<T> {
 
 /// The receiver and the converted arguments of a handle method call, the
 /// node first and, when `with_name`, the component name second.
-fn receive(values: &[rune::Value], with_name: bool) -> Result<(String, Vec<Neutral>), String> {
+fn receive(
+    values: &[rune::Value],
+    with_name: bool,
+) -> Result<(&'static str, Vec<Neutral>), String> {
     let Some(this) = values.first() else {
         return Err("component method called without a receiver".into());
     };
     let (node, name) = match this.borrow_ref::<Component>() {
-        Ok(c) => (c.node, c.name.clone()),
+        Ok(c) => (c.node, c.name),
         Err(_) => return Err("component method called on something else".into()),
     };
     let mut neutral = Vec::with_capacity(values.len() + 1);
     neutral.push(Neutral::Node(node));
     if with_name {
-        neutral.push(Neutral::Str(name.clone()));
+        neutral.push(Neutral::Str(name.to_string()));
     }
     for v in &values[1..] {
         neutral.push(to_neutral(v).map_err(|e| e.to_string())?);
@@ -395,7 +433,7 @@ fn method_handler(
             Ok(r) => r,
             Err(err) => return fail(err),
         };
-        let Some(&handle) = targets.get(&name) else {
+        let Some(&handle) = targets.get(name) else {
             return fail(format!(
                 "`{name}` has no `{method}`; no module driving it declares one"
             ));

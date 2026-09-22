@@ -22,12 +22,21 @@ thread_local! {
     /// Where each widget was drawn, for a script that has to place something
     /// against it — the editor's own chrome reads its shell back this way.
     static PLACED: RefCell<FxHashMap<u64, egui::Rect>> = const { RefCell::new(FxHashMap::with_hasher(rustc_hash::FxBuildHasher)) };
+    /// Where a `tab` page's own button in the strip was drawn, keyed by the
+    /// page: the strip is painted inline and has no node to ask.
+    static TAB_HEADS: RefCell<FxHashMap<u64, egui::Rect>> = const { RefCell::new(FxHashMap::with_hasher(rustc_hash::FxBuildHasher)) };
     static PLACING: RefCell<FxHashMap<u64, egui::Rect>> = const { RefCell::new(FxHashMap::with_hasher(rustc_hash::FxBuildHasher)) };
 }
 
 /// The rect a widget was last drawn at, or `None` before it has drawn.
 pub(crate) fn drawn_at(entity: Entity) -> Option<egui::Rect> {
     PLACED.with(|m| m.borrow().get(&entity.to_bits().get()).copied())
+}
+
+/// Where a tab page's button in the strip was last drawn, or `None` before
+/// the strip has drawn.
+pub(crate) fn tab_head_at(entity: Entity) -> Option<egui::Rect> {
+    TAB_HEADS.with(|m| m.borrow().get(&entity.to_bits().get()).copied())
 }
 
 /// The rect a widget took in the pass being drawn now, for what has to
@@ -196,7 +205,7 @@ fn themed_frame(style: &crate::widget::theme::Style, fill: Option<Color32>) -> e
 pub(crate) fn scroller(ui: &mut egui::Ui, at: &mut Painting<'_>, index: usize) {
     let placed = &at.arena[index];
     let (entity, widget) = (placed.entity, placed.widget.clone());
-    let box_size = box_of(&widget, at.assigned);
+    let box_size = solved_of(&widget, &at.style_of(&widget), at.assigned);
     let room = ui.max_rect();
     let size = vec2(
         if box_size.x > 0.0 {
@@ -321,6 +330,9 @@ pub(crate) fn tabs(ui: &mut egui::Ui, at: &mut Painting<'_>, index: usize) {
     let (color, font) = crate::widget::theme::face(&at.theme, &style, &widget);
     let gap = gap_of(&widget, &at.style_of(&widget));
 
+    // The page each strip button stands for, read before the strip borrows
+    // the arena, so the button can leave its box under that page's entity.
+    let heads: Vec<Entity> = pages.iter().map(|(i, _, _)| at.arena[*i].entity).collect();
     let mut strip = ui.new_child(egui::UiBuilder::new().max_rect(rect));
     let chosen = strip
         .horizontal(|ui| {
@@ -341,7 +353,12 @@ pub(crate) fn tabs(ui: &mut egui::Ui, at: &mut Painting<'_>, index: usize) {
                     (true, None) => button.fill(Color32::from_black_alpha(96)),
                     (false, _) => button.fill(Color32::TRANSPARENT),
                 };
-                if ui.add(button).clicked() {
+                let response = ui.add(button);
+                TAB_HEADS.with(|m| {
+                    m.borrow_mut()
+                        .insert(heads[slot].to_bits().get(), response.rect);
+                });
+                if response.clicked() {
                     chosen = Some(name.clone());
                 }
             }
@@ -381,17 +398,42 @@ pub(crate) fn tabs(ui: &mut egui::Ui, at: &mut Painting<'_>, index: usize) {
     ui.advance_cursor_after_rect(rect);
 }
 
-/// The box a widget occupies: what it states, else what its parent gave it.
+/// The size the layout settles on: what the widget asks for, else the box it
+/// was handed, never below its own floor.
 ///
 /// Godot's container contract — a child fills the rect it was assigned unless
 /// it names a size of its own. 0 on an axis means "hug", which is what a root
 /// and every scene written before `grow` gets.
-pub(crate) fn box_of(widget: &Widget, assigned: egui::Vec2) -> egui::Vec2 {
-    let stated = vec2(widget.width, widget.height);
+pub(crate) fn solved_of(
+    widget: &Widget,
+    style: &crate::widget::theme::Style,
+    assigned: egui::Vec2,
+) -> egui::Vec2 {
+    let stated = size_of(widget, style);
     let floor = vec2(widget.min_width, widget.min_height);
     vec2(
         if stated.x > 0.0 { stated.x } else { assigned.x }.max(floor.x),
         if stated.y > 0.0 { stated.y } else { assigned.y }.max(floor.y),
+    )
+}
+
+/// The size a widget asks for before the layout offers it one: what the node
+/// states, else what its role does, and zero for "measure me".
+///
+/// The node wins outright. A theme is where a size lives by default, never
+/// something a node has to fight. Both sizing paths read this: `solved_of` for
+/// the kinds that place themselves, and `taffy::style_of` for the containers.
+pub(crate) fn size_of(widget: &Widget, style: &crate::widget::theme::Style) -> egui::Vec2 {
+    let pick = |stated: f32, role: Option<f32>| {
+        if stated > 0.0 {
+            stated
+        } else {
+            role.unwrap_or(0.0)
+        }
+    };
+    vec2(
+        pick(widget.width, style.width),
+        pick(widget.height, style.height),
     )
 }
 

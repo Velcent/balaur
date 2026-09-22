@@ -6,7 +6,7 @@
 //! each one is. A Godot type with no counterpart here — a Dictionary, a
 //! Callable, an array of numbers — is not exported, and the report says so.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use balaur_plugin::toml;
@@ -29,6 +29,12 @@ pub(crate) struct Classes {
     /// Each class module's functions that take defaulted parameters, with
     /// how many parameters each takes in all.
     pub defaulted: BTreeMap<String, BTreeMap<String, usize>>,
+    /// Every function each class declares, so `Class.name` is known to be
+    /// one rather than a constant to read.
+    pub methods: BTreeMap<String, BTreeSet<String>>,
+    /// How many values each signal carries, by name across the project: a
+    /// handler is connected to a signal another class declares.
+    pub signal_arity: BTreeMap<String, usize>,
 }
 
 /// What an export holds, in the types an `exports()` spec has.
@@ -69,6 +75,13 @@ impl Export {
         let kind = self.kind?;
         // Quoted keys: `default` is a Rune keyword and cannot stand bare.
         let typed = |ty: &str| format!("#{{ \"type\": \"{ty}\", \"default\": {} }}", self.default);
+        // A list says what it holds, the way every composite spec does.
+        let listed = |ty: &str| {
+            format!(
+                "#{{ \"type\": \"list\", \"of\": #{{ \"type\": \"{ty}\" }}, \"default\": {} }}",
+                self.default
+            )
+        };
         Some(match kind {
             // A bare default already says what these are.
             Kind::Int | Kind::Float | Kind::Bool | Kind::Str => self.default.clone(),
@@ -77,8 +90,8 @@ impl Export {
             Kind::Vec2 => typed("vec2"),
             Kind::Vec3 => typed("vec3"),
             Kind::Color => typed("color"),
-            Kind::Strings => typed("strings"),
-            Kind::Nodes => typed("nodes"),
+            Kind::Strings => listed("string"),
+            Kind::Nodes => listed("node"),
         })
     }
 }
@@ -456,6 +469,13 @@ pub(crate) fn class_index(root: &Path, files: &[String]) -> Classes {
             if let Some(base) = word("extends ") {
                 classes.bases.insert(name.clone(), base);
             }
+            for (signal, takes) in crate::godot::script::signal_arities(&source) {
+                classes.signal_arity.entry(signal).or_insert(takes);
+            }
+            let methods = crate::godot::script::function_names(&source);
+            if !methods.is_empty() {
+                classes.methods.insert(name.clone(), methods);
+            }
             let statics = crate::godot::script::static_vars(&source);
             if !statics.is_empty() {
                 classes.statics.insert(name.clone(), statics);
@@ -597,11 +617,11 @@ mod tests {
             one("@export var hearts: Array[CanvasItem]", &none)
                 .1
                 .as_deref(),
-            Some("#{ \"type\": \"nodes\", \"default\": [] }")
+            Some("#{ \"type\": \"list\", \"of\": #{ \"type\": \"node\" }, \"default\": [] }")
         );
         assert_eq!(
             one("@export var names: Array[String]", &none).1.as_deref(),
-            Some("#{ \"type\": \"strings\", \"default\": [] }")
+            Some("#{ \"type\": \"list\", \"of\": #{ \"type\": \"string\" }, \"default\": [] }")
         );
         assert_eq!(
             one("@export var at: Vector2 = Vector2(1, 2)", &none)

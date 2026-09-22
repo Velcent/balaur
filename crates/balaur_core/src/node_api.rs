@@ -279,7 +279,7 @@ pub fn install_node_api(m: &mut dyn Bindings<Engine>) {
         ("state", &["states"], "()", "The state the node is in, or \"\" for the pose the scene gave it."),
         ("patch_component", &[], "(component: string, params: table)", "Change the properties the table names and leave the rest of the component where they were. On a node without the component this adds it, the schema defaults being what it currently holds."),
         ("remove_component", &[], "(component: string)", "Take the named component off the node."),
-        ("get_component", &[], "(component: string)", "The named component's properties as a table, nil when the node does not carry it."),
+        ("get_component", &[], "(component: string, key: string?)", "The named component's properties as a table, nil when the node does not carry it. With a key, that one property rather than the table, which is what a caller reading a single value should ask for."),
         ("has_component", &[], "(component: string)", "Whether the node carries the named component."),
         ("component_names", &[], "()", "The names of every component on the node."),
         ("stable_id", &[], "()", "The node's stable id: what a scene file declared, or what it was given when it was spawned. Survives rename and reparent, which a path does not."),
@@ -294,7 +294,7 @@ pub fn install_node_api(m: &mut dyn Bindings<Engine>) {
         ("detach_script", &[], "()", "Drop the script instance on this node, so no further lifecycle call reaches it; the node and its components stay."),
         ("queue_free", &[], "()", "Destroy the node and its subtree at the end of the frame."),
         ("visible", &[], "(node)", "Whether the node itself is set to draw; an ancestor may still hide it."),
-        ("set_visible", &[], "(node, on: bool)", "Show or hide the node and everything under it. Physics is untouched: a hidden collider still collides."),
+        ("set_visible", &[], "(node, on: bool)", "Show or hide the node and everything under it, emitting `visibility_changed` with the new value when the flag moves. Physics is untouched: a hidden collider still collides."),
         ("global_visible", &[], "(node)", "What the renderer sees: false when the node or any ancestor is hidden."),
         ("tint", &[], "(node)", "The node's own tint as r, g, b, a channel floats; an ancestor's multiplies into it on the way to the screen."),
         ("set_tint", &[], "(node, r: float, g: float, b: float, a: float?)", "Multiply a colour into everything the node and its subtree draw, alpha included, one meaning untinted. A renderable's own `color` is the node's alone; this is the one that inherits."),
@@ -393,9 +393,17 @@ fn visible(eng: &Engine, args: &[Value]) -> Result<Value> {
 
 fn set_visible(eng: &Engine, args: &[Value]) -> Result<Value> {
     let on = flag(args, 1)?;
-    with_appearance(eng, node(args)?, |a| a.visible = on)?;
+    let e = node(args)?;
+    let was = with_appearance(eng, e, |a| std::mem::replace(&mut a.visible, on))?;
+    if was != on {
+        crate::events::emit_from(eng, e, VISIBILITY_EVENT, Value::Bool(on));
+    }
     Ok(Value::Nil)
 }
+
+/// What a node emits when its own `visible` flips, carrying the new value.
+/// An ancestor hiding it does not: the flag this reports is the node's own.
+pub const VISIBILITY_EVENT: &str = "visibility_changed";
 
 /// What the renderer sees: false when any ancestor is hidden.
 fn global_visible(eng: &Engine, args: &[Value]) -> Result<Value> {
@@ -525,7 +533,7 @@ fn tags(eng: &Engine, args: &[Value]) -> Result<Value> {
     let world = eng.world();
     let list = world
         .get::<&Tags>(e)
-        .map(|t| t.0.iter().cloned().map(Value::Str).collect())
+        .map(|t| t.0.iter().cloned().map(Value::text).collect())
         .unwrap_or_default();
     Ok(Value::List(list))
 }
@@ -767,13 +775,42 @@ fn set_component(eng: &Engine, args: &[Value]) -> Result<Value> {
 /// The difference from `set_component` is the whole reason both exist:
 /// describing a component whole is what a scene file means, and changing one
 /// property is what a script driving it over time means.
+/// Write one property of the component at `index`, for a backend that has
+/// already resolved both the component and the key.
+///
+/// The conversion to TOML is core's, so a backend needs no opinion about the
+/// scene format to drive one property over time.
+///
+/// # Errors
+/// When the node is gone, the value is not one a component can hold, or the
+/// component's `apply` refuses it.
+pub fn set_property_at(
+    eng: &Engine,
+    entity: Entity,
+    index: usize,
+    key: &str,
+    value: &Value,
+) -> Result<()> {
+    crate::components::set_property_at(eng, entity, index, key, &to_toml(value)?)
+}
+
 fn patch_component(eng: &Engine, args: &[Value]) -> Result<Value> {
     let e = node(args)?;
     let params = to_toml(
         args.get(2)
             .ok_or_else(|| anyhow!("patch_component needs the properties to change"))?,
     )?;
-    crate::components::patch(eng, e, text(args, 1)?, &params)?;
+    let name = text(args, 1)?;
+    // One property is what a script driving a value over time writes, and
+    // `set_property` is the path that does not read the table back for it.
+    if let Some(table) = params.as_table()
+        && table.len() == 1
+        && let Some((key, value)) = table.iter().next()
+    {
+        crate::components::set_property(eng, e, name, key, value)?;
+        return Ok(Value::Nil);
+    }
+    crate::components::patch(eng, e, name, &params)?;
     Ok(Value::Nil)
 }
 
@@ -803,16 +840,19 @@ fn remove_component(eng: &Engine, args: &[Value]) -> Result<Value> {
 
 fn get_component(eng: &Engine, args: &[Value]) -> Result<Value> {
     let e = node(args)?;
-    crate::components::get(eng, e, text(args, 1)?)
-        .as_ref()
-        .map_or(Ok(Value::Nil), from_toml)
+    let name = text(args, 1)?;
+    // With a key, one property: a control reading what it now holds asked for
+    // the whole table, and building that was a twelfth of the editor's frame.
+    let found = match args.get(2) {
+        Some(Value::Str(key)) => crate::components::property(eng, e, name, key),
+        _ => crate::components::get(eng, e, name),
+    };
+    found.as_ref().map_or(Ok(Value::Nil), from_toml)
 }
 
 fn has_component(eng: &Engine, args: &[Value]) -> Result<Value> {
     let e = node(args)?;
-    Ok(Value::Bool(
-        crate::components::get(eng, e, text(args, 1)?).is_some(),
-    ))
+    Ok(Value::Bool(crate::components::has(eng, e, text(args, 1)?)))
 }
 
 fn component_names(eng: &Engine, args: &[Value]) -> Result<Value> {
@@ -820,7 +860,7 @@ fn component_names(eng: &Engine, args: &[Value]) -> Result<Value> {
     Ok(Value::List(
         crate::components::present_on(eng, e)
             .into_iter()
-            .map(Value::Str)
+            .map(Value::text)
             .collect(),
     ))
 }
@@ -969,7 +1009,8 @@ fn queue_free(eng: &Engine, args: &[Value]) -> Result<Value> {
     Ok(Value::Nil)
 }
 
-/// One property a script declared, against the component schema vocabulary.
+/// One property a script declared, against the component schema vocabulary,
+/// and back with every nested `default` filled in.
 ///
 /// Here rather than in `components` because the spec arrives as a script
 /// value, and this is the module that converts one: a backend asking whether
@@ -977,9 +1018,22 @@ fn queue_free(eng: &Engine, args: &[Value]) -> Result<Value> {
 ///
 /// # Errors
 /// The reason, for a caller that prefixes the script and the property.
-pub fn validate_property_spec(spec: &Value) -> std::result::Result<(), String> {
-    let table = to_toml(spec).map_err(|e| e.to_string())?;
-    crate::components::validate_property(&table)
+pub fn checked_property_spec(spec: &Value) -> std::result::Result<Value, String> {
+    let mut table = to_toml(spec).map_err(|e| e.to_string())?;
+    crate::components::validate_property(&table)?;
+    crate::components::complete_property(&mut table);
+    from_toml(&table).map_err(|e| e.to_string())
+}
+
+/// One value against the spec that governs it, for a caller holding a list's
+/// entries to what its first one said.
+///
+/// # Errors
+/// The reason the value is not what the spec declares.
+pub fn check_property_value(spec: &Value, value: &Value) -> std::result::Result<(), String> {
+    let spec = to_toml(spec).map_err(|e| e.to_string())?;
+    let value = to_toml(value).map_err(|e| e.to_string())?;
+    crate::components::validate_value(&spec, &value)
 }
 
 /// Component parameters travel as TOML, so a script table and a scene file
@@ -1032,7 +1086,7 @@ pub fn from_toml(v: &toml::Value) -> Result<Value> {
         toml::Value::Table(table) => Value::Map(
             table
                 .iter()
-                .map(|(k, val)| Ok((k.clone(), from_toml(val)?)))
+                .map(|(k, val)| Ok((k.as_str().into(), from_toml(val)?)))
                 .collect::<Result<_>>()?,
         ),
     })

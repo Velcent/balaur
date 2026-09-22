@@ -640,6 +640,8 @@ pub(crate) fn setter(receiver: &str, field: &str, value: &str) -> Option<String>
         "rotation_degrees" => format!("(gd.set_rotation)({receiver}, math::rad({value}))"),
         "rotation" => format!("(gd.set_rotation)({receiver}, {value})"),
         "custom_minimum_size" => format!("(gd.set_min_size)({receiver}, {value})"),
+        // A control's own size is the widget panel's width and height here.
+        "size" => format!("(gd.set_size)({receiver}, {value})"),
         "button_group" => format!(
             "{receiver}.patch_component(\"widget\", #{{ \"group\": {value}, \"toggle\": true }})"
         ),
@@ -892,6 +894,12 @@ pub(crate) fn signal_verb(signal: &str, verb: &str, args: &[String]) -> Option<S
 
 /// Signals the engine itself sends, heard as events; a script's own are
 /// called as they are emitted.
+/// Godot's "it went away", which the engine reports as the visibility event.
+pub(crate) const HIDDEN_SIGNAL: &str = "hidden";
+
+/// The engine's own name for it, carrying the new value.
+pub(crate) const VISIBILITY_SIGNAL: &str = "visibility_changed";
+
 const ENGINE_SIGNALS: &[&str] = &[
     "timeout",
     "animation_finished",

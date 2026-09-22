@@ -1,4 +1,4 @@
-> **Status:** not started. Written 2026-09-05 from the Godot parity
+> **Status:** steps 3 and 7 are built; the rest is not started. Written 2026-09-05 from the Godot parity
 > investigation: the renderer draws every node it is handed, once, from one
 > camera, into the window.
 
@@ -87,12 +87,87 @@ mesh.
 
 1. Camera projection; bounds, frustum culling, `render.in_view`.
 2. Layers and cull masks.
-3. Automatic instancing.
+3. Automatic instancing. **Built**, and 3b says what it holds to.
 4. `viewport` on a window rect, and the fork hook.
 5. `viewport` to a texture.
 6. Level of detail and ranges.
-7. 2D batching.
+7. 2D batching. **Built**, and 3a says what it holds to.
 8. `multimesh`.
+
+## 3a. What 2D batching has to do
+
+**Built 2026-09-21.** Runs of `Flat` shapes and of sprites draw as one call,
+a sheet frame included: the fork's `InstanceData2d` carries a `uv` rectangle,
+the surface pipeline binds it at location 6, and the vertex stage mixes the
+mesh's own coordinates through it. The default rectangle is the whole image,
+so a draw that asks for nothing is unchanged.
+
+That rectangle also ends a second cost. `set_uv_rect` opens with
+`make_mesh_unique`, so every sprite on a sheet frame owned a copy of the
+built-in quad; a batched one now shares it.
+
+**Measured 2026-09-20**, `scripts/bench_load.py --only kind/shape2d`: five
+thousand sprites offscreen at 1600x1000 cost 29.3 ms of wall, of which
+21.4 ms is render CPU and 1.55 ms is GPU. A `sample` of the main thread puts
+40% of it in `CommandEncoder::finish` replaying the pass into Metal and 13% in
+`Object2d::render` recording it. The GPU is idle; the cost is one draw per
+node.
+
+The fork already draws instanced: `Object2d` owns an `InstancesBuffer2d`, and
+`draw_indexed` takes the instance range. `InstanceData2d` carries a position,
+a 2x2 deformation and a colour, which is a sprite's whole world pose, shear
+and tint.
+
+What it does not carry is the UV rect. A sprite's atlas frame is written onto
+that node's own mesh by `sync_sprite_uvs`, so two nodes on different frames
+cannot share a draw. The fork needs a per-instance UV rect and the 2D shader
+needs to multiply by it; that is the first half of this step.
+
+The second half is the run. `sync_2d` keeps one `SceneNode2d` per entity,
+ordered by layer then z. A batch has to be contiguous in that order, or it
+changes what covers what, so the sync walks the order and cuts a run wherever
+the material, the texture, the mesh or the blend changes. A run becomes one
+object with an instance per node; a node that is hidden leaves the run's
+instance list.
+
+What breaks a run, and stays one draw each: a `polygon`, a tile map, world
+text, a node with its own material, and a shape whose mesh is not the run's.
+A circle and a rectangle each batch with their own kind, from a unit mesh the
+instance deformation scales.
+
+Picking is unaffected: it reads `Renderable2d` and `GlobalTransform` from the
+world, never the backend's nodes.
+
+What the run cutting cost, on the same case: render CPU went from 21.4 ms to
+0.41, and the wall from 29.3 to 4.8. Both pictures were compared pixel by
+pixel against the same scene drawn node by node, over a grid of two dozen
+rectangles turned, scaled and tinted apart, and over the `angrynerds`
+example; neither moved a channel.
+
+## 3b. What 3D instancing has to do
+
+**Built 2026-09-21.** Two thousand balls cost 31.9 ms of render CPU, 16 µs a
+node, which was the worst number in the benchmark suite once 2D batched.
+
+Three dimensions are easier in one way. Geometry is depth-tested and the sync
+walks a query rather than a sorted order, so a group needs no place in an
+order and any nodes that draw alike may join one wherever they sit.
+
+They are stricter in another. An instance carries a position, a 3x3 and a
+colour, and the shader multiplies normals by that same 3x3 — correct only
+where the scale is even, since an uneven one needs the inverse transpose.
+So a node scaled unevenly keeps its own object. So does a skinned one, which
+is posed on its node, and a model with levels of detail, which swaps geometry
+as the eye moves.
+
+Everything else a node holds is the object's and so is the key's: the shape
+or the `mesh` asset, the texture, the material, the shadow flag and the light
+layers.
+
+An uneven scale could join later. It needs a second 3x3 on the instance, read
+at the locations `mesh.wesl` has free, or an inverse transpose worked out in
+the vertex stage. Neither is hard, and neither has a measurement behind it:
+nobody has counted how much of a real scene repeats a mesh and stretches it.
 
 ## 4. What CI can prove, and what it cannot
 

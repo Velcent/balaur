@@ -3,6 +3,9 @@
 //! events into [`balaur_input::InputSnapshot`], ticks the [`App`], then mirrors
 //! renderables into the kiss3d scene graph.
 
+pub(crate) mod geometry;
+mod screenshot;
+
 use balaur_core::time::Instant;
 use std::collections::{HashMap, HashSet};
 
@@ -10,15 +13,14 @@ use balaur_core::hecs::Entity;
 use balaur_core::{App, GlobalAppearance, GlobalTransform};
 use glamx::Pose3;
 use kiss3d::prelude::*;
-use kiss3d::resource::GpuMesh3d;
 
 use crate::kiss3d_camera::{
     CameraButtons, apply_camera, apply_camera_2d, apply_camera_input, publish_camera,
     publish_camera_2d,
 };
 use crate::{
-    ClearColorConfig, GridConfig, PostConfig, Renderable2d, Renderable3d, ScreenshotRequest,
-    Shape2d, Shape3d, WindowConfig, WindowedBackend,
+    ClearColorConfig, GridConfig, PostConfig, Renderable2d, Renderable3d, Shape2d, WindowConfig,
+    WindowedBackend,
 };
 
 struct Slot {
@@ -42,7 +44,7 @@ struct Slot {
 
 /// What a skinned 3D mesh keeps between frames: the vertices as authored,
 /// which bones move them, and where the rig is.
-struct MeshSkinSlot {
+pub(crate) struct MeshSkinSlot {
     positions: Vec<Vec3>,
     normals: Option<Vec<Vec3>>,
     joints: Vec<[u32; 4]>,
@@ -86,6 +88,8 @@ struct Frontend {
     scene_2d: SceneNode2d,
     slots: HashMap<Entity, Slot>,
     slots_2d: HashMap<Entity, Slot2d>,
+    batches_2d: crate::sync_2d::Batches,
+    batches_3d: crate::batch_3d::Batches3d,
     tilemap_slots: HashMap<Entity, crate::tilemap::TilemapSlot>,
     emitter_slots: HashMap<Entity, crate::particles::EmitterSlot>,
     materials: crate::shader_material::MaterialCache,
@@ -96,6 +100,8 @@ struct Frontend {
     transients: Vec<SceneNode2d>,
     text: crate::world_text::Frame,
     frame: u64,
+    /// Whether frames reach an OS window, which an offscreen run's do not.
+    on_screen: bool,
     /// Whether the on-screen keyboard was summoned last frame, so it is
     /// shown/hidden on the edge rather than re-requested every frame.
     keyboard_shown: bool,
@@ -141,6 +147,8 @@ impl Frontend {
             scene_2d: SceneNode2d::empty(),
             slots: HashMap::new(),
             slots_2d: HashMap::new(),
+            batches_2d: crate::sync_2d::Batches::default(),
+            batches_3d: crate::batch_3d::Batches3d::default(),
             tilemap_slots: HashMap::new(),
             emitter_slots: HashMap::new(),
             materials: crate::shader_material::MaterialCache::default(),
@@ -154,6 +162,7 @@ impl Frontend {
             transients: Vec::new(),
             text: crate::world_text::Frame::default(),
             frame: 0,
+            on_screen: true,
             keyboard_shown: false,
             camera_buttons,
             device: crate::device::Probe::default(),
@@ -176,6 +185,7 @@ impl Frontend {
             app,
             &mut self.scene_2d,
             &mut self.slots_2d,
+            &mut self.batches_2d,
             &mut self.materials,
             reloaded,
         );
@@ -191,12 +201,13 @@ impl Frontend {
             app.engine.root(),
             &mut self.scene_2d,
             &mut self.slots_2d,
+            &mut self.batches_2d,
             &mut self.tilemap_slots,
             &mut self.order_2d,
         );
     }
 
-    /// One frame: apply what scripts asked for, tick, mirror the world into
+    /// One frame: apply what scripts asked for, tick, mirror the world into    /// One frame: apply what scripts asked for, tick, mirror the world into
     /// the scene graph, draw the overlays. Answers whether to keep going.
     fn step(&mut self, app: &mut App, window: &mut Window, dt: f32) -> bool {
         apply_camera(app, &mut self.camera);
@@ -207,7 +218,7 @@ impl Frontend {
             &mut self.camera_2d,
             &self.camera_buttons,
         );
-        crate::app_icon::apply_app_icon(app);
+        crate::app_icon::apply_app_icon(app, self.on_screen, self.frame);
         apply_window_config(app, window);
         publish_camera(app, &self.camera, window);
         publish_camera_2d(app, &self.camera_2d, window);
@@ -247,6 +258,7 @@ impl Frontend {
             app,
             &mut self.scene,
             &mut self.slots,
+            &mut self.batches_3d,
             &mut self.materials_3d,
             reloaded,
         );
@@ -298,7 +310,7 @@ impl Frontend {
             window.set_keyboard_visible(wants_keyboard);
         }
         self.frame += 1;
-        take_screenshot_if_due(app, window, self.frame);
+        screenshot::take_if_due(app, window, self.frame);
         !app.engine.quit_requested()
     }
 }
@@ -333,6 +345,11 @@ fn report_render_cost(app: &App, window: &Window) {
     balaur_core::timings::record(&app.engine, "render cpu", timings.total);
     if let Some(gpu) = timings.gpu_total() {
         balaur_core::timings::record(&app.engine, "render gpu", gpu);
+    }
+    // Each pass under its own name: a frame that says the GPU spent 8 ms does
+    // not say whether that was the shadows, the transparency or the tonemap.
+    for (name, cost) in timings.gpu_steps.iter().flatten() {
+        balaur_core::timings::record(&app.engine, name, *cost);
     }
 }
 
@@ -379,8 +396,10 @@ pub async fn run_windowed_async(
         }),
         ..CanvasSetup::default()
     };
+    let phase = balaur_core::timings::Phase::start();
     let mut window =
         Window::new_with_setup(title, window_settings.width, window_settings.height, setup).await;
+    phase.note("renderer");
     // A lazy UI builds no widgets on an idle frame, so the last pass's shapes
     // have to be drawn again. kiss3d stopped doing that by default.
     window.set_ui_retained(true);
@@ -424,10 +443,14 @@ pub async fn run_windowed_async(
         if !f.step(&mut app, &mut window, dt) {
             break;
         }
+        // The 2D pass is a full-screen load and store of the film whether or
+        // not anything draws into it, and the renderer skips it for a scene
+        // that is not there.
+        let draws_2d = !f.scene_2d.data().children().is_empty();
         let open = window
             .render_chains(
                 Some(&mut f.scene),
-                Some(&mut f.scene_2d),
+                draws_2d.then_some(&mut f.scene_2d),
                 Some(&mut f.camera),
                 Some(&mut f.camera_2d),
                 None,
@@ -485,10 +508,13 @@ pub fn run_offscreen(mut app: App, title: &str, width: u32, height: u32) -> anyh
     pollster::block_on(async move {
         // Not `new_hidden_*`: a hidden window still needs a display server.
         // Surface-less rendering runs on a CI box with no display at all.
+        let phase = balaur_core::timings::Phase::start();
         let mut window =
             Window::new_headless_with_setup(width, height, CanvasSetup::default()).await;
+        phase.note("renderer");
         window.set_ui_retained(true);
         let mut f = Frontend::new();
+        f.on_screen = false;
         // Nothing can close a target that was never shown, and there is no
         // vsync to block on, so the loop runs until the app asks to stop --
         // which `--frames` arranges by inserting a quit-after-N system.
@@ -499,10 +525,11 @@ pub fn run_offscreen(mut app: App, title: &str, width: u32, height: u32) -> anyh
             }
             // After the step, as the windowed loop draws: a capture of frame
             // N is then step N's shell rather than step N-1's.
+            let draws_2d = !f.scene_2d.data().children().is_empty();
             let open = window
                 .render_chains(
                     Some(&mut f.scene),
-                    Some(&mut f.scene_2d),
+                    draws_2d.then_some(&mut f.scene_2d),
                     Some(&mut f.camera),
                     Some(&mut f.camera_2d),
                     None,
@@ -567,6 +594,10 @@ fn apply_post(app: &App, window: &mut Window) {
     }
     window.set_ssr_enabled(post.ssr);
     window.set_dof_enabled(post.dof);
+    // Bloom and auto-exposure compile on demand, so a project that never uses
+    // them never builds them. Here is where the settings changed, which is a
+    // better place to wait for a compiler than the first frame that draws one.
+    window.prepare_post();
 }
 
 /// Ground-plane grid, drawn as per-frame lines on the XZ plane.
@@ -640,59 +671,12 @@ fn apply_window_config(app: &App, window: &Window) {
     crate::device::keep_awake(config.keep_awake);
 }
 
-/// The snapped frame as PNG bytes, so the backend writes them wherever it
-/// keeps files.
-fn encoded_png(image: &image::RgbImage) -> std::result::Result<Vec<u8>, image::ImageError> {
-    let mut bytes = std::io::Cursor::new(Vec::new());
-    image.write_to(&mut bytes, image::ImageFormat::Png)?;
-    Ok(bytes.into_inner())
-}
-
-fn take_screenshot_if_due(app: &App, window: &Window, frame: u64) {
-    let Some(request) = app.engine.try_resource::<ScreenshotRequest>() else {
-        return;
-    };
-    let due = {
-        let request = request.borrow();
-        frame >= request.after_frame
-    };
-    if !due {
-        return;
-    }
-    let path = request.borrow().path.clone();
-    {
-        let world = app.engine.world();
-        for (entity, renderable, global) in
-            &mut world.query::<(Entity, &Renderable3d, &GlobalTransform)>()
-        {
-            let _ = renderable;
-            tracing::debug!("renderable {entity:?} at {}", global.position);
-        }
-    }
-    let image = window.snap_image();
-    // Encoded here and handed to the backend: a browser has no disk to save
-    // to, and the path may name a directory that is not there yet.
-    match encoded_png(&image) {
-        Ok(bytes) => {
-            let fs = balaur_core::files::backend(&app.engine);
-            if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
-                let _ = fs.mkdir(dir);
-            }
-            match fs.write(&path, &bytes) {
-                Ok(()) => tracing::debug!("saved screenshot to {}", path.display()),
-                Err(err) => tracing::error!("screenshot failed: {err:#}"),
-            }
-        }
-        Err(err) => tracing::error!("screenshot failed: {err:#}"),
-    }
-    app.engine.remove_resource::<ScreenshotRequest>();
-}
-
 /// Mirror `Renderable3d` + `GlobalTransform` into the kiss3d scene graph.
 fn sync(
     app: &App,
     scene: &mut SceneNode3d,
     slots: &mut HashMap<Entity, Slot>,
+    batches: &mut crate::batch_3d::Batches3d,
     materials: &mut crate::shader_material_3d::MaterialCache3d,
     reloaded: bool,
 ) {
@@ -705,10 +689,18 @@ fn sync(
     materials.answer_probe(app);
 
     let eye = crate::lods::eye(&app.engine);
+    if relinked || channel_changed || reloaded {
+        batches.reconsider();
+    }
+    let member_of = crate::batch_3d::cut_groups(app, scene, materials, &channel, batches);
     let mut seen: HashSet<Entity> = HashSet::new();
     for (entity, renderable, global) in
         &mut world.query::<(Entity, &Renderable3d, &GlobalTransform)>()
     {
+        if let Some(group) = member_of.get(&entity) {
+            take_over(slots, entity, *group, batches, &world);
+            continue;
+        }
         seen.insert(entity);
         // Read once: the ancestors' tint, visibility and material come off
         // the same propagated component.
@@ -742,7 +734,9 @@ fn sync(
                 old.node.remove();
             }
             // Nothing to draw yet, and whatever failed said why.
-            let Some((mut node, skin, geometry, lods)) = build_node(app, scene, renderable) else {
+            let Some((mut node, skin, geometry, lods)) =
+                geometry::build_node(app, scene, renderable)
+            else {
                 continue;
             };
             // After the texture: a material reads it, and kiss3d's own
@@ -800,6 +794,27 @@ fn sync(
         let clones = world.get::<&crate::Clones>(entity).ok();
         crate::instancing::set_instances_3d(&mut slot.node, clones.as_deref(), global);
     }
+    crate::batch_3d::flush(batches);
+    drop_unseen(slots, &seen);
+}
+
+/// Hand a node to the group that now draws it. A slot from before it joined
+/// one would draw it twice.
+fn take_over(
+    slots: &mut HashMap<Entity, Slot>,
+    entity: Entity,
+    group: usize,
+    batches: &mut crate::batch_3d::Batches3d,
+    world: &balaur_core::hecs::World,
+) {
+    if let Some(mut old) = slots.remove(&entity) {
+        old.node.remove();
+    }
+    crate::batch_3d::write_instance(world, entity, group, batches);
+}
+
+/// Take away the nodes of everything that no longer draws.
+fn drop_unseen(slots: &mut HashMap<Entity, Slot>, seen: &HashSet<Entity>) {
     slots.retain(|entity, slot| {
         if seen.contains(entity) {
             true
@@ -816,7 +831,7 @@ fn sync(
 /// These are the node's business rather than the shader's because they decide
 /// which pass it joins, and the scene walk that collects the refracting
 /// surfaces runs before any material is asked anything.
-fn apply_surface(node: &mut SceneNode3d, surface: &crate::material::Surface) {
+pub(crate) fn apply_surface(node: &mut SceneNode3d, surface: &crate::material::Surface) {
     use crate::material::AlphaMode;
     node.set_alpha_mode(match surface.alpha {
         AlphaMode::Opaque => kiss3d::scene::AlphaMode::Opaque,
@@ -838,138 +853,6 @@ fn apply_surface(node: &mut SceneNode3d, surface: &crate::material::Surface) {
     node.set_thickness(surface.thickness);
     let [r, g, b, _] = surface.attenuation_color;
     node.set_attenuation(Color::new(r, g, b, 1.0), surface.attenuation_distance);
-}
-
-/// Hand a mesh's triangles to kiss3d as a static node. Normals and UVs are
-/// optional in the format; kiss3d computes normals from the faces when they
-/// are absent, which is the right answer for a bare OBJ.
-fn upload_geometry(scene: &mut SceneNode3d, data: &balaur_core::mesh::MeshData) -> SceneNode3d {
-    let coords: Vec<Vec3> = data
-        .positions
-        .iter()
-        .map(|p| Vec3::from_array(*p))
-        .collect();
-    let normals = data
-        .normals
-        .as_ref()
-        .map(|ns| ns.iter().map(|n| Vec3::from_array(*n)).collect());
-    let uvs = data
-        .uvs
-        .as_ref()
-        .map(|us| us.iter().map(|u| Vec2::from_array(*u)).collect());
-    let mut gpu = GpuMesh3d::new(coords, data.indices.clone(), normals, uvs, false);
-    if let Some(colors) = &data.colors {
-        gpu.set_colors(colors.clone());
-    }
-    scene.add_mesh(std::rc::Rc::new(std::cell::RefCell::new(gpu)), Vec3::ONE)
-}
-
-/// A 3D node as built: the node, a skinned mesh's rest and bindings, the
-/// geometry its skinning material draws, and a model's levels of detail.
-type Built3d = (
-    SceneNode3d,
-    Option<MeshSkinSlot>,
-    Option<crate::skinned_3d::SkinnedMesh3d>,
-    Option<crate::lods::Lods>,
-);
-
-/// Build the node a renderable's shape asks for, or `None` with nothing to
-/// draw yet.
-fn build_node(app: &App, scene: &mut SceneNode3d, renderable: &Renderable3d) -> Option<Built3d> {
-    match renderable.shape {
-        // Built by the mesher rather than by kiss3d: the triangles a collider
-        // is fitted to and a ray is picked against are the ones uploaded here.
-        Shape3d::Solid(solid) => Some((upload_geometry(scene, &solid.build()), None, None, None)),
-        // A boolean's result, already worked out this tick.
-        Shape3d::Built => renderable
-            .built
-            .as_deref()
-            .filter(|mesh| !mesh.indices.is_empty())
-            .map(|mesh| (upload_geometry(scene, mesh), None, None, None)),
-        Shape3d::Mesh => upload_mesh(app, scene, renderable),
-    }
-}
-
-/// Resolve a `mesh` asset and hand its triangles to kiss3d, with the skin to
-/// deform them by when the asset carries one. `None` when the asset is
-/// missing or unreadable, which is logged rather than fatal: one bad model
-/// must not stop the frame.
-fn upload_mesh(app: &App, scene: &mut SceneNode3d, renderable: &Renderable3d) -> Option<Built3d> {
-    let reference = renderable.mesh.as_deref().filter(|r| !r.is_empty())?;
-    let definition = match balaur_core::assets::load_typed::<balaur_core::mesh::MeshData>(
-        &app.engine,
-        reference,
-    ) {
-        Ok(definition) => definition,
-        Err(err) => {
-            tracing::error!("mesh '{reference}': {err:#}");
-            return None;
-        }
-    };
-    let data = match balaur_core::mesh::load_from(&app.engine, &definition) {
-        Ok(data) => data,
-        Err(err) => {
-            tracing::error!("mesh '{reference}': {err:#}");
-            return None;
-        }
-    };
-    let coords: Vec<Vec3> = data
-        .positions
-        .iter()
-        .map(|p| Vec3::new(p[0], p[1], p[2]))
-        .collect();
-    let faces: Vec<[u32; 3]> = data.indices.clone();
-    // Normals and UVs are optional in the format; kiss3d computes normals from
-    // the faces when they are absent, which is the right answer for a bare OBJ.
-    let normals: Option<Vec<Vec3>> = data
-        .normals
-        .as_ref()
-        .map(|ns| ns.iter().map(|n| Vec3::new(n[0], n[1], n[2])).collect());
-    let uvs = data
-        .uvs
-        .as_ref()
-        .map(|us| us.iter().map(|u| Vec2::new(u[0], u[1])).collect());
-    // The geometry the skinning material draws from, kept before the skin is
-    // moved into the slot. Nothing to skin with no triangles, and an empty
-    // vertex buffer is one wgpu refuses to create.
-    let geometry = data
-        .skin
-        .as_ref()
-        .filter(|_| !coords.is_empty() && !faces.is_empty())
-        .map(|skin| crate::skinned_3d::SkinnedMesh3d {
-            positions: coords.clone(),
-            normals: normals
-                .clone()
-                .unwrap_or_else(|| GpuMesh3d::compute_normals_array(&coords, &faces)),
-            uvs: uvs.clone().unwrap_or_default(),
-            joints: skin.joints.clone(),
-            weights: skin.weights.clone(),
-            indices: faces.clone(),
-        });
-    let lods = crate::lods::Lods::of(&app.engine, &data, &faces);
-    // The shapes and the colours before the skin is moved out of the data.
-    let morphs = crate::morph::targets_of(&data);
-    let colors = data.colors.clone();
-    let skin = data.skin.map(|skin| MeshSkinSlot {
-        positions: coords.clone(),
-        normals: normals.clone(),
-        joints: skin.joints,
-        weights: skin.weights,
-        bones: skin.bones,
-        inverse_bind: skin.inverse_bind,
-        skeleton: renderable.skeleton.clone(),
-    });
-    // A skinned mesh is rewritten every frame; a rigid one is uploaded once.
-    let mut gpu = GpuMesh3d::new(coords, faces, normals, uvs, skin.is_some());
-    if let Some(targets) = morphs {
-        gpu.set_morph_targets(targets);
-    }
-    if let Some(colors) = colors {
-        gpu.set_colors(colors);
-    }
-    let mut node = scene.add_mesh(std::rc::Rc::new(std::cell::RefCell::new(gpu)), Vec3::ONE);
-    crate::texture::attach_texture_3d(&app.engine, &mut node, &renderable.texture);
-    Some((node, skin, geometry, lods))
 }
 
 /// Pose a skinned mesh for this frame from the rig's joint matrices: handed

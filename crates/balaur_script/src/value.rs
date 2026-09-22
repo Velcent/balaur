@@ -40,6 +40,15 @@ pub enum Value {
 }
 
 impl Value {
+    /// A string value from anything that spells one.
+    ///
+    /// The constructor rather than the variant, for a call site handing
+    /// `Value::Str` to `map` or `map_or` over something that is not already a
+    /// `String`.
+    pub fn text(text: impl Into<String>) -> Self {
+        Self::Str(text.into())
+    }
+
     pub const fn type_name(&self) -> &'static str {
         match self {
             Self::Nil => "nil",
@@ -196,7 +205,7 @@ impl IntoValue for String {
 }
 impl IntoValue for &str {
     fn into_value(self) -> Value {
-        Value::Str(self.to_string())
+        Value::Str(self.into())
     }
 }
 impl IntoValue for NodeId {

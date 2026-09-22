@@ -37,3 +37,22 @@ jobs:
     # and without them the Mac build has an identity name but no certificate.
     secrets: inherit
     uses: ./.github/workflows/build.yml
+
+  # No `needs`: the signing image holds no engine, so a pull request hears
+  # about it in minutes rather than after the build matrix.
+  container-signer:
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/container-signer.yml
+
+  # The same engine as a container image, from that run's own editor binaries.
+  # `!cancelled()` because a failure elsewhere in the matrix — a mobile export,
+  # the web bundle — used to skip this without a word.
+  container:
+    needs: build
+    if: ${{ !cancelled() }}
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/container.yml

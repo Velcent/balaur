@@ -194,7 +194,10 @@ fn install_web_api(m: &mut dyn Bindings<Engine>) {
             eng.resource::<WebState>()
                 .borrow_mut()
                 .listeners
-                .push(Handler { node, method });
+                .push(Handler {
+                    node,
+                    method: method.clone(),
+                });
             Ok(())
         },
     );
@@ -210,10 +213,10 @@ fn install_web_api(m: &mut dyn Bindings<Engine>) {
         Ok(eng.resource::<WebState>().borrow().visible)
     });
     m.function("user_agent", |eng: &Engine, ()| {
-        Ok(fact(eng, |f| f.user_agent.clone().map(Value::Str)))
+        Ok(fact(eng, |f| f.user_agent.clone().map(Value::text)))
     });
     m.function("location", |eng: &Engine, ()| {
-        Ok(fact(eng, |f| f.location.clone().map(Value::Str)))
+        Ok(fact(eng, |f| f.location.clone().map(Value::text)))
     });
     m.function("hardware_concurrency", |eng: &Engine, ()| {
         Ok(fact(eng, |f| {

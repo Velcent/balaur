@@ -60,6 +60,10 @@ pub struct Request {
     pub italic: bool,
     /// The width lines break at; `None` runs the text on one line.
     pub width: Option<f32>,
+    /// Cut a line too long for `width` and end it with an ellipsis, rather
+    /// than leave the caller to clip it mid-glyph. Needs a `width`, and says
+    /// nothing about a block that wraps.
+    pub truncate: bool,
     pub align: Align,
     pub markup: bool,
     /// A `font` asset naming a bitmap face; empty shapes with the project's
@@ -85,6 +89,10 @@ pub struct RequestRef<'a> {
     pub weight: u16,
     pub italic: bool,
     pub width: Option<f32>,
+    /// Cut a line too long for `width` and end it with an ellipsis, rather
+    /// than leave the caller to clip it mid-glyph. Needs a `width`, and says
+    /// nothing about a block that wraps.
+    pub truncate: bool,
     pub align: Align,
     pub markup: bool,
     pub font: &'a str,
@@ -103,6 +111,7 @@ impl RequestRef<'_> {
             weight: self.weight,
             italic: self.italic,
             width: self.width,
+            truncate: self.truncate,
             align: self.align,
             markup: self.markup,
             font: self.font.to_string(),
@@ -123,6 +132,7 @@ impl Request {
             weight: self.weight,
             italic: self.italic,
             width: self.width,
+            truncate: self.truncate,
             align: self.align,
             markup: self.markup,
             font: &self.font,
@@ -141,7 +151,7 @@ impl Request {
 /// owned its strings allocated three times on every one of them.
 type Key = u64;
 
-fn key_of(request: &RequestRef<'_>, generation: u64) -> Key {
+fn key_of(request: &RequestRef<'_>, generation: u64, scale: f32) -> Key {
     use std::hash::{Hash as _, Hasher as _};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     request.text.hash(&mut hasher);
@@ -149,6 +159,7 @@ fn key_of(request: &RequestRef<'_>, generation: u64) -> Key {
     request.weight.hash(&mut hasher);
     request.italic.hash(&mut hasher);
     request.width.map(f32::to_bits).hash(&mut hasher);
+    request.truncate.hash(&mut hasher);
     (request.align as u8).hash(&mut hasher);
     request.markup.hash(&mut hasher);
     request.font.hash(&mut hasher);
@@ -156,6 +167,7 @@ fn key_of(request: &RequestRef<'_>, generation: u64) -> Key {
     request.line_height.to_bits().hash(&mut hasher);
     request.letter_spacing.to_bits().hash(&mut hasher);
     generation.hash(&mut hasher);
+    scale.to_bits().hash(&mut hasher);
     hasher.finish()
 }
 
@@ -311,7 +323,7 @@ impl TextState {
     /// Shape for the widget layer: lays out, then hands egui whatever the
     /// atlas gained, so the texture behind `texture` holds these glyphs.
     pub fn shape_for_egui(&mut self, ctx: &egui::Context, request: &RequestRef<'_>) -> Rc<Shaped> {
-        let shaped = self.shape_ref(request);
+        let shaped = self.shape_at(request, ctx.pixels_per_point());
         self.atlas.flush_egui(ctx);
         shaped
     }
@@ -375,7 +387,16 @@ impl TextState {
     /// [`Self::shape`], for a caller holding the text rather than owning it:
     /// a hit costs the hash and no allocation at all.
     pub fn shape_ref(&mut self, request: &RequestRef<'_>) -> Rc<Shaped> {
-        let key = key_of(request, self.atlas.generation);
+        self.shape_at(request, 1.0)
+    }
+
+    /// The same, rasterising the glyphs at `scale` device pixels per point.
+    ///
+    /// The layout stays in points; only the atlas is denser. Drawn at one
+    /// raster pixel per point instead, a caption is magnified by the UI scale
+    /// and filtered, which is what made the editor's own labels soft at 1.25.
+    fn shape_at(&mut self, request: &RequestRef<'_>, scale: f32) -> Rc<Shaped> {
+        let key = key_of(request, self.atlas.generation, scale);
         if let Some(found) = self.layouts.get(&key) {
             return Rc::clone(found);
         }
@@ -384,7 +405,7 @@ impl TextState {
         if self.layouts.len() > 4096 {
             self.layouts.clear();
         }
-        let shaped = Rc::new(self.layout(request));
+        let shaped = Rc::new(self.layout(request, scale));
         self.layouts.insert(key, Rc::clone(&shaped));
         shaped
     }
@@ -427,7 +448,7 @@ impl TextState {
         )
     }
 
-    fn layout(&mut self, request: &RequestRef<'_>) -> Shaped {
+    fn layout(&mut self, request: &RequestRef<'_>, scale: f32) -> Shaped {
         // A bitmap font has one glyph per character and no contextual forms,
         // so it lays out rather than shapes.
         if !request.font.is_empty()
@@ -438,7 +459,76 @@ impl TextState {
         let parsed = spans_of(request);
         let family = self.family_for(request);
         let buffer = shape_into(&mut self.fonts, family.as_deref(), request);
-        self.place(&buffer, &parsed, request.width)
+        let shaped = self.place(&buffer, &parsed, request.width, scale);
+        let Some(room) = request.width.filter(|_| request.truncate) else {
+            return shaped;
+        };
+        // Measured with no box, because a run given one reports the box's
+        // width rather than its own: the clamped number always fits.
+        if self.natural(request, family.as_deref(), request.text, scale) <= room {
+            return shaped;
+        }
+        self.cut_to(request, family.as_deref(), room, scale)
+    }
+
+    /// The longest head of the text that fits `room` with an ellipsis after
+    /// it, shaped.
+    ///
+    /// A binary search over the character boundaries rather than one shape a
+    /// character: sixty characters cost six shapes, and only on a cache miss.
+    fn cut_to(
+        &mut self,
+        request: &RequestRef<'_>,
+        family: Option<&str>,
+        room: f32,
+        scale: f32,
+    ) -> Shaped {
+        let ends: Vec<usize> = request
+            .text
+            .char_indices()
+            .map(|(at, _)| at)
+            .chain(std::iter::once(request.text.len()))
+            .collect();
+        let mut fits = 0;
+        let (mut low, mut high) = (0, ends.len());
+        while low < high {
+            let mid = usize::midpoint(low, high);
+            let text = format!("{}…", &request.text[..ends[mid]]);
+            if self.natural(request, family, &text, scale) <= room {
+                fits = mid;
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+        let text = format!("{}…", &request.text[..ends[fits]]);
+        let cut = RequestRef {
+            text: &text,
+            truncate: false,
+            ..*request
+        };
+        let parsed = spans_of(&cut);
+        let buffer = shape_into(&mut self.fonts, family, &cut);
+        self.place(&buffer, &parsed, request.width, scale)
+    }
+
+    /// What `text` measures with no box around it, in this request's face.
+    fn natural(
+        &mut self,
+        request: &RequestRef<'_>,
+        family: Option<&str>,
+        text: &str,
+        scale: f32,
+    ) -> f32 {
+        let plain = RequestRef {
+            text,
+            width: None,
+            truncate: false,
+            ..*request
+        };
+        let parsed = spans_of(&plain);
+        let buffer = shape_into(&mut self.fonts, family, &plain);
+        self.place(&buffer, &parsed, None, scale).size.x
     }
 
     /// Lay a run out in a bitmap font, placing its page in the atlas the
@@ -486,7 +576,13 @@ impl TextState {
     }
 
     /// Every laid-out glyph as a quad on the atlas, and every picture's box.
-    fn place(&mut self, buffer: &Buffer, parsed: &markup::Markup, width: Option<f32>) -> Shaped {
+    fn place(
+        &mut self,
+        buffer: &Buffer,
+        parsed: &markup::Markup,
+        width: Option<f32>,
+        scale: f32,
+    ) -> Shaped {
         let mut quads = Vec::new();
         let mut pictures = Vec::new();
         let mut extent = Vec2::ZERO;
@@ -506,7 +602,7 @@ impl TextState {
                     });
                     continue;
                 }
-                let physical = glyph.physical((0.0, 0.0), 1.0);
+                let physical = glyph.physical((0.0, 0.0), scale);
                 let hard = self.aliased.contains(&physical.cache_key.font_id);
                 let Some(slot) =
                     self.atlas
@@ -514,10 +610,12 @@ impl TextState {
                 else {
                     continue;
                 };
-                let x = physical.x as f32 + slot.offset.x;
-                let y = run.line_y + physical.y as f32 - slot.offset.y;
+                // Back to points: the glyph was placed and rasterised in
+                // device pixels, and everything around it is in points.
+                let x = (physical.x as f32 + slot.offset.x) / scale;
+                let y = run.line_y + (physical.y as f32 - slot.offset.y) / scale;
                 quads.push(Quad {
-                    rect: Rect::from_min_size(pos2(x, y), slot.size),
+                    rect: Rect::from_min_size(pos2(x, y), slot.size / scale),
                     uv: slot.uv,
                     color: span.and_then(|s| s.color),
                     colored: slot.colored,
@@ -572,7 +670,9 @@ fn shape_into(fonts: &mut FontSystem, family: Option<&str>, request: &RequestRef
     let mut buffer = Buffer::new(fonts, Metrics::new(size, size * line_height));
     {
         let mut borrowed = buffer.borrow_with(fonts);
-        borrowed.set_wrap(if request.width.is_some() {
+        // A truncating run states its width so the cut knows the room, and
+        // stays on one line: the ellipsis is what says there is more.
+        borrowed.set_wrap(if request.width.is_some() && !request.truncate {
             Wrap::WordOrGlyph
         } else {
             Wrap::None
@@ -711,19 +811,23 @@ mod tests {
 
     fn shape(text: &str, width: Option<f32>) -> (TextState, Shaped) {
         let mut state = TextState::new(&faces(), "en-US");
-        let shaped = state.layout(&RequestRef {
-            text,
-            size: 20.0,
-            weight: 400,
-            italic: false,
-            width,
-            align: Align::Start,
-            markup: true,
-            font: "",
-            family: "",
-            line_height: 0.0,
-            letter_spacing: 0.0,
-        });
+        let shaped = state.layout(
+            &RequestRef {
+                text,
+                size: 20.0,
+                weight: 400,
+                italic: false,
+                width,
+                truncate: false,
+                align: Align::Start,
+                markup: true,
+                font: "",
+                family: "",
+                line_height: 0.0,
+                letter_spacing: 0.0,
+            },
+            1.0,
+        );
         (state, shaped)
     }
 
@@ -736,6 +840,7 @@ mod tests {
             size: 24.0,
             weight: 400,
             italic: false,
+            truncate: false,
             width: None,
             align: Align::Start,
             markup: false,
@@ -791,6 +896,55 @@ mod tests {
         assert!(inked, "the glyph's box in the atlas is blank");
     }
 
+    /// Filling the page doubles it rather than starting over, so a glyph
+    /// already rasterised keeps its pixels and is never drawn again.
+    #[test]
+    fn an_atlas_that_fills_up_doubles_instead_of_starting_over() {
+        let mut state = TextState::new(&faces(), "en-US");
+        let ask = |state: &mut TextState, text: String| {
+            state.shape(&Request {
+                text,
+                size: 64.0,
+                weight: 400,
+                italic: false,
+                truncate: false,
+                width: None,
+                align: Align::Start,
+                markup: false,
+                font: String::new(),
+                family: String::new(),
+                line_height: 0.0,
+                letter_spacing: 0.0,
+            })
+        };
+        let opened = state.atlas().side();
+        // Enough distinct glyphs at a size that fills a small page.
+        for c in 'a'..='z' {
+            ask(&mut state, c.to_string());
+        }
+        for c in 'A'..='Z' {
+            ask(&mut state, c.to_string());
+        }
+        let grown = state.atlas().side();
+        assert!(
+            grown > opened,
+            "the atlas stayed at {opened} and wiped instead"
+        );
+        assert_eq!(state.atlas().rgba().len(), grown * grown * 4);
+        // The first glyph still has ink where its UV says, which a reset
+        // would have taken away.
+        let shaped = ask(&mut state, "a".to_owned());
+        let uv = shaped.quads[0].uv;
+        let rgba = state.atlas().rgba();
+        let x0 = (uv.min.x * grown as f32) as usize;
+        let y0 = (uv.min.y * grown as f32) as usize;
+        let x1 = (uv.max.x * grown as f32).ceil() as usize;
+        let y1 = (uv.max.y * grown as f32).ceil() as usize;
+        let inked =
+            (y0..y1).any(|row| (x0..x1).any(|column| rgba[(row * grown + column) * 4 + 3] > 0));
+        assert!(inked, "the glyph's box in the grown atlas is blank");
+    }
+
     /// A second consumer must see a stable atlas: shaping the same run twice
     /// comes from the cache and writes nothing new.
     #[test]
@@ -801,6 +955,7 @@ mod tests {
             size: 20.0,
             weight: 400,
             italic: false,
+            truncate: false,
             width: None,
             align: Align::Start,
             markup: false,

@@ -219,6 +219,231 @@ This is not §1's `render cpu` line. That one is the tessellation a row
 genuinely causes. This is the same work repeated on frames that drew nothing
 new, and it is fixed in the fork rather than here.
 
+## 6b. What a control costs to read
+
+**Built 2026-09-20.** A pooled control read its whole `widget` component twice
+a frame to learn the one property it carries, and a control that carries
+nothing read it once for nothing. Each read built a TOML table of about forty
+keys with the widget's class tables cloned into it, then converted that table
+into script values.
+
+`node.get_component(component, key)` now answers one property, and the `widget`
+component answers the common keys straight off the struct through
+`components::answers_property`. `pool.rn` asks for the one property it wants,
+and asks for nothing at all where a control carries nothing.
+
+Measured on `examples/hello`, offscreen, 600 frames, three pairs run back to
+back on a machine that was also building: the `ui` pass reads 16.2, 18.9 and
+16.9 ms against 20.4, 20.6 and 23.7 ms before, so about a fifth off. The
+absolute numbers are inflated by the load; the ratio is what to read.
+
+A sampled profile of the same run puts 63% of the main thread in
+`balaur_ui::pass` and almost all of that in the Rune VM, so §2's kinds are
+still where the rest is.
+
+## 6d. What the registry costs every read and every write
+
+**Built 2026-09-20.** §6b made the read of one property cheap for `widget`.
+This is the half underneath it, which every component pays and no component
+had to be taught.
+
+Four things were wrong. `ComponentRegistry` was a `Vec` scanned by string, and
+a single `patch` resolved the name four times: for the schema, for what was
+asked before, to apply, and to record. `patch` then rebuilt the schema's
+defaults into a fresh table on every call, wrote the component's own table over
+them, and ran the colour pass and the asset pass over the result whether or not
+the schema declared either. `has_component` built the whole table to answer a
+bool.
+
+The registry is now a `DetHashMap` keyed by name, so a lookup is a hash and
+iteration is still registration order, which is what a component's bit in
+`Attached` and the editor's section order both read. Registration works out
+each schema's defaults, and whether it has any colour or any asset property,
+once and holds them in `Facts`. A write resolves the name once and carries the
+index. `patch` starts from the component's own table instead of from the
+defaults, fills only the keys that table left out, and skips the colour and
+asset passes a schema does not need. `has_component` reads the `Attached` bit.
+
+Registering one name twice now panics naming it. Two definitions under one name
+was silent before: every lookup answered with the first, so the second's
+`apply` never ran.
+
+Measured with `cargo bench -p balaur_bench --bench components`, release, Apple
+M1, three-second samples.
+
+| | before | after |
+| --- | ---: | ---: |
+| `node.transform.position = [..]` from a script | 2.42 µs | 1.74 µs |
+| `components::patch`, one property | 1.41 µs | 1.17 µs |
+| `components::get`, whole table | 344 ns | 283 ns |
+| `node.get_component(name, key)` | 1.08 µs | 1.00 µs |
+| `node.transform.position` read | 1.06 µs | 1.03 µs |
+
+The write is what moved, and it is the one animation pays: a track drives one
+property through `patch` every tick.
+
+What is left, in the order the numbers rank it:
+
+- **`patch` still reads the whole table.** `get` is a quarter of what a write
+  costs and cannot be skipped: the component may have moved since, which is the
+  reason `patch` consults it rather than trusting what was asked for.
+- **`present_on` asks every definition.** It runs every component's `get` over
+  one node to learn which are there. `Attached` would answer in one read, but
+  `transform` rides in the node bundle and has no bit, so the bitmask cannot be
+  trusted on its own yet. The same gap is why a presence test costs 370 ns on
+  `transform` and 30 ns on a component the registry attached.
+
+## 6e. A name is a number, not a small string
+
+**Built 2026-09-21.** §6d left a script read of `node.transform.position`
+spending 283 ns building the table and about 750 ns crossing the seam. This is
+the seam half, and it went down a wrong path first.
+
+The measurement was right and the reading of it was wrong. A binding call
+taking nothing costs 190 ns, one taking an integer 216 ns, and one taking the
+string `"transform"` 298 ns, so a string argument costs about 82 ns more than
+an integer. A 54-byte string costs barely more than a 9-byte one, which says
+the cost is an allocation rather than a copy.
+
+The first answer was to stop allocating: `Value::Str` held a `SmolStr`, which
+keeps up to 22 bytes inline. It bought nothing. The same three cases read 190,
+216 and 298 ns afterwards, because the allocation is Rune building the string
+value for the literal, on its own side of the call, where nothing the seam
+does can reach it. It also made a string past 22 bytes worse, and it put two
+string types in a codebase that wants one. It is gone.
+
+**The answer every engine of this kind uses is an id.** Godot interns a
+`StringName` and compares the pointer; Unreal's `FName` is an index into a
+global table; Unity hands out an `int` from `StringToHash` and takes that
+forever; Bevy addresses a component by a numeric `ComponentId`. A name is text
+at the edges and a number at run time. Balaur already did this twice, for
+`MaterialId::intern` and for the component registry's own index.
+
+So the handle carries the number. `Component` holds the registry index beside
+the interned name, resolved when the field was installed. `components` grew
+`index_of`, `property_at`, `patch_at` and `node_api::set_property_at`, all
+addressed by that index. A property's set of owning components is a `u128`
+mask rather than a `HashSet<String>`, and the defaults a read falls back on
+are a table indexed the same way. `PropertyReaders` is a `Vec` indexed by
+component rather than a map keyed by name.
+
+What that removes from one `node.transform.position`: two `String`
+allocations, three hashes of the component name, and the trip through the
+neutral value seam, which the backend no longer needs for a call whose two
+names it resolved at startup.
+
+## 6f. What all of it was worth
+
+**Measured 2026-09-21**, release, Apple M1, five-second samples. The machine
+builds three other checkouts of this repository, so each figure below was
+taken with the load average under six and the case's own interval inside one
+percent. Anything measured while the load climbed is left out rather than
+reported wide.
+
+| | before | after |
+| --- | ---: | ---: |
+| `components::property`, one key | 372 ns | 89 ns |
+| `components::present_on` | 947 ns | 135 ns |
+| a presence test on the bundle's `transform` | 370 ns | 37 ns |
+| a presence test on a registry-attached component | 37 ns | 38 ns |
+| `components::patch`, one property | 1.41 µs | 838 ns |
+| `components::get`, whole table | 344 ns | 352 ns |
+| a component name resolved | 9.3 ns first, linear after | 17 ns, flat |
+
+The two presence tests now cost the same, which is the point of §6d's second
+mask: no component is outside what the bits can answer. `get` is unchanged
+because nothing here made building a whole table cheaper; what changed is how
+rarely anything has to.
+
+The name lookup is the one thing that got slower, and only at one end. A hash
+costs 17 ns where the scan it replaced found `transform` on its first
+comparison in 9.3 ns, because `transform` registers first. The scan was linear
+and the hash is flat, so the last of the forty-eight went the other way, and a
+write resolves one name where it used to resolve four.
+
+What a script pays, measured the same way:
+
+| | before | after |
+| --- | ---: | ---: |
+| `node.transform.position = [..]` | 2.42 µs | 926 ns |
+| `node.transform.position` read | 1.06 µs | 495 ns |
+| `node.get_component(name, key)` | 1.08 µs | 765 ns |
+| `node.has_component(name)` | 612 ns | 403 ns |
+
+A write is the one that moved most, and it is the one animation pays: a track
+drives one property through this every tick, and it used to call `patch`
+directly rather than the component's own single-property path.
+
+`set_one_property` against `patch_one_property` is what that swap is worth.
+The only run of the pair so far was taken while the machine was building three
+other checkouts, so read the ratio and not the figures: 1.90 against 5.34
+microseconds, a third of the cost. Both are several times their quiet value.
+Re-run the pair on an idle machine and put the two numbers here.
+
+## 6g. Where the whole tables actually were
+
+**Measured 2026-09-21.** §6d left the whole-table build as the largest cost a
+component still pays, and the fix looked like changing what fifty `get` hooks
+hand back. Counting first said otherwise.
+
+A scratch tally on `get`, on `patch` and on the single-property fallback, over
+sixty frames of six real projects:
+
+| | entities | whole tables a frame |
+| --- | ---: | ---: |
+| `examples/hello` | 22 | 0 |
+| `examples/angrynerds` | 38 | 0 |
+| `examples/rig` | 30 | 0 |
+| `examples/tiles` | 4 | 0 |
+| `examples/objects` | 47 | 1 |
+| `examples/interface` | 61 | 3 |
+
+A running game barely builds one. The editor did: 41 a frame over 120 frames
+of `balaur edit examples/hello`, and **four in five of them were one key**.
+`widget.submitted` is a `bool` on the widget struct, a pooled control asks for
+it every frame, and the reader did not claim it, so each read built a table of
+forty keys to answer false. `widget.role` was another ninety-seven.
+
+Two match arms in `balaur_ui`'s `read_property` took the editor from 4954
+whole tables over 120 frames to 836, and the fallback to none.
+
+**So the table's shape is not worth changing.** `benches/props.rs` prices it:
+borrowing the keys is 3x on a component of four properties and 17x on one of
+thirteen, and unboxing the values on top is another 2.5x. But at one to three
+builds a frame in a game, and seven in the editor, the whole refactor is worth
+about a microsecond a frame. It also no longer fits: `record` nests, so a flat
+value enum cannot hold one. The bench stays as the record of what was priced.
+
+What the counting did prove is that **a missing reader key is invisible**. The
+fallback answers correctly and costs forty keys, so nothing fails and nothing
+warns. `components::answers_alone` exists so a test can tell the two apart,
+and `balaur_ui`'s `widget_reader` suite holds the keys a frame reads.
+
+## 6c. The shell writes what changed
+
+**Built 2026-09-20.** `pool.rn` patched every widget it drives on every pass:
+the bars, the rail, the tabs, each inspector row and each of its controls. A
+patch rebuilds the widget and dirties the layout, and a shell that nobody
+touched asks for the same table it asked for last pass.
+
+The pool now remembers what it last asked each control to hold and writes only
+when the table differs. What was asked for is forgotten when a node is made,
+when a host's children are rebuilt, and on the pass a reader's own edit landed,
+since the value on the node is then not the one in the table.
+
+Measured on 300 frames, offscreen at 1920x1080, interleaved pairs, min of
+three:
+
+| | before | after |
+| --- | ---: | ---: |
+| `examples/hello`, docks open | 11.33 ms | 6.04 ms |
+| `examples/hello`, every dock shut | 5.18 ms | 2.88 ms |
+| `examples/angrynerds` | 10.85 ms | 6.14 ms |
+
+Where the rest of it sits, on `examples/hello` before this landed: the chrome
+with every dock shut was 5.8 ms of the 12.3, the inspector 2.7, the Output
+dock 2.4 and the outliner 1.5.
+
 ## 7. The instrument
 
 `engine.profile_scripts(on)` and `engine.script_costs()` count VM instructions
@@ -226,9 +451,32 @@ per script, and the Profiler dock has a `scripts` toggle that turns them on.
 Instructions rather than milliseconds, so two runs of the same frame report the
 same number and a change in the reading is a change in what a script does.
 
+`--timings` also names each GPU pass, which the fork already timed and the
+backend only totalled. On `examples/hello` at 1920x1080 the editor's 6.9 ms of
+GPU is tonemap 2.7, opaque 2.0, the 2D pass 1.9 and shadows 0.3, and at a
+quarter of the pixels it is 2.6 ms, so the frame's floor is fill rather than
+anything the scene holds.
+
 The editor compiles as one Rune unit, so the count is the whole shell rather
 than a figure per file. Ablation is what localises it, as §5 did: stub one call,
 re-run, take the difference.
+
+## 8. What was measured and left alone
+
+**2026-09-21.** Two leads were priced and not taken, so the next reader does
+not price them again.
+
+- **The pointer's hit test in a window.** `pick::under_pointer_2d` now answers
+  nothing on a viewport no backend published into, which covers headless and
+  offscreen. A windowed game with no pointer hook still scans every renderable
+  a tick. Gating that needs the set of subscribing nodes kept as scripts attach
+  and bindings change, because a cache keyed on a revision recomputes every
+  frame in any game that spawns. It was 3% of a frame holding five thousand
+  sprites.
+- **A smaller film, and post fused into one pass.** Both trade bandwidth, and
+  bandwidth is not what the frame is short of: the GPU was 1.55 ms of a 29 ms
+  frame before batching. `Rgba16Float` is also the format SSAO, SSR and the
+  probes share, so the change is not one line.
 
 ## Phases
 

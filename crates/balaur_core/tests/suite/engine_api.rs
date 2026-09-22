@@ -303,7 +303,7 @@ fn a_script_can_write_to_the_log_it_reads_back() {
             &app.engine,
             "log",
             level,
-            &[Value::Str(format!("hello from {level}"))],
+            &[Value::text(format!("hello from {level}"))],
         )
         .unwrap();
     }

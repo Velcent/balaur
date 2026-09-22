@@ -60,6 +60,9 @@ mod viewport;
 // already says.
 const COMPACT_W = 1240.0;
 
+// The frame the splash comes off whether or not the shell has stopped moving.
+const FORM_BY = 30;
+
 pub fn init(this) {
     let S = #{
         persona: "scene",
@@ -84,6 +87,9 @@ pub fn init(this) {
         palette: false,
         palette_query: "",
         palette_submit: false,
+        // Whether the picker's field has been handed the caret since it
+        // opened; it takes it once, not every frame.
+        picker_focused: false,
         newnode: false,
         newnode_query: "",
         renaming: false,
@@ -92,8 +98,7 @@ pub fn init(this) {
         compact: false,
         // Empty until the first frame reads the screen, so whatever class it
         // turns out to be is a change and folds the docks accordingly.
-        width_class: "",
-        height_class: "",
+
         // The room's answers the docks were last folded for: a change is a
         // new screen, whatever the class words did.
         screen_key: "",
@@ -142,6 +147,9 @@ pub fn init(this) {
         layout_demo: -1,
         // The same for the row views' test, and the row it asks for.
         rows_demo: -1,
+        plugin_demo: -1,
+        events_demo: -1,
+        palette_demo: -1,
         import_demo: -1,
         import_waited: 0,
         // The start screen's conversion under test: frames waited, and where
@@ -302,15 +310,16 @@ pub fn update(this, dt) {
     }
     S.frame += 1;
     shell::release_world(S);
-    // The splash holds until the shell has settled: the first pass places
-    // the docks, the second fills the tree once the mirror resolves, the
-    // third is the first drawn with everything in place.
+    // The splash holds until the shell stops moving: every box is read back a
+    // pass after it was written, so the sizes correct themselves for several.
+    // `FORM_BY` is where it gives up waiting.
     if !S.formed {
-        if S.frame >= 3 && S.refs.len() == S.doc.len() {
+        let ready = S.frame >= 3 && S.refs.len() == S.doc.len() && layout::settled(S);
+        if ready || S.frame >= FORM_BY {
             S.formed = true;
             ui::loaded();
         } else {
-            ui::set_loading(0.4 + 0.2 * util::f(S.frame), "");
+            ui::set_loading(util::clamp(0.4 + 0.06 * util::f(S.frame), 0.0, 0.95), "");
         }
     }
     let shot_some = S.shot;
@@ -320,17 +329,21 @@ pub fn update(this, dt) {
             report_view(S);
         }
     }
-    // The start screen has no scene to step, no selection to follow and no
-    // gizmo to drag: what it needs from a frame is the shot and the states.
-    if manager::showing(S) {
-        apply_start_states(S);
-        ui::request_repaint();
-        return;
-    }
+    // Above the start screen's own return: a clip of a project converting is
+    // taken on that screen, and it has no other frame to be caught on.
     let cap = S.capture;
     if cap is Object && S.frame >= cap.from && (S.frame - cap.from) % cap.every == 0 {
         render::screenshot(format!("{}/{}.png", cap.dir, padded(cap.n)));
         cap.n = cap.n + 1;
+    }
+    // The start screen has no scene to step, no selection to follow and no
+    // gizmo to drag: what it needs from a frame is the shot, the states and
+    // the showcase, whose sequence turns this screen's own pages.
+    if manager::showing(S) {
+        showcase::step(S);
+        apply_start_states(S);
+        ui::request_repaint();
+        return;
     }
     let paused = debugger::paused();
     if paused is Object && !(S.debug.paused is Object) {
@@ -386,6 +399,18 @@ pub fn update(this, dt) {
     if S.settings.demo >= 0 {
         selftest::settings_step(S);
     }
+    if S.machine.demo >= 0 {
+        statemachine::demo_step(S);
+    }
+    if S.plugin_demo >= 0 {
+        selftest::plugin_step(S);
+    }
+    if S.events_demo >= 0 {
+        selftest::events_step(S);
+    }
+    if S.palette_demo >= 0 {
+        selftest::palette_step(S);
+    }
     showcase::step(S);
     // A replay or a showcase feeds the pointer into the snapshot the viewport
     // tools read, so a drag would follow the feed rather than the mouse.
@@ -409,10 +434,10 @@ pub fn update(this, dt) {
     // HUD label sits above the editor's chrome instead of under it.
     let band = if widgets_on { center::hud_h(S) + 6.0 } else { 0.0 };
     ui::set_widget_layer(widgets_on, rect.x, rect.y, rect.w, util::max(0.0, rect.h - band));
-    // The shell is on its own surface, declared rather than assumed: an
-    // unconfigured layer takes the default one, and the default is off
-    // whenever the game's widgets are.
-    ui::set_widget_surface("shell", true, 0.0, 0.0, S.screen_w, S.screen_h);
+    // The window, never `S.screen_w`: that is the shell's own solved rect, and
+    // a surface taken from it shrinks the shell it sizes, frame by frame.
+    let (surface_w, surface_h) = ui::screen_size();
+    ui::set_widget_surface("shell", true, 0.0, 0.0, surface_w, surface_h);
     if S.tool == "key" && S.persona == "anim" && input::mouse_just_pressed(input::MOUSE_LEFT) {
         anim::add_key(S, S.anim.time);
     }
@@ -451,7 +476,8 @@ pub fn update(this, dt) {
     let telling = !S.jobs.is_empty();
     if S.playing || S.showcase is Object || session::scrubbing(S) || S.capture is Object
         || S.session.demo is Object || S.layout_demo >= 0 || S.settings.demo >= 0
-        || S.rows_demo >= 0
+        || S.rows_demo >= 0 || S.machine.demo >= 0 || S.plugin_demo >= 0
+        || S.events_demo >= 0 || S.palette_demo >= 0
         || S.gesture_demo >= 0 || telling
         || layout::animating(S) || S.gizmo.drag is Object
     {
@@ -484,16 +510,20 @@ pub fn draw_ui(this) {
     if pasted != "" {
         model::paste_nodes(S, pasted);
     }
+    // The room the shell has, which the engine solved: the window less what
+    // a notch covers. Read back a pass late, as every other rect here is;
+    // the window stands in until it has drawn once.
     let (sw, sh) = ui::screen_size();
-    S.screen_w = sw;
-    S.screen_h = sh;
+    let (rw, rh) = crate::layout::shell_room(S);
+    S.screen_w = if rw > 0.0 { rw } else { sw };
+    S.screen_h = if rh > 0.0 { rh } else { sh };
     // Either forces it on: the setting asks for it at any width, and a narrow
     // window asks for it whatever the setting says.
     let compact = S.settings.compact || sw < COMPACT_W;
     S.compact = compact;
     let first = !S.platform_read;
     S.platform_read = true;
-    docks::follow_screen(S, ui::width_class(), ui::height_class());
+    docks::follow_screen(S);
     if first {
         apply_start_states(S);
     }
@@ -629,6 +659,9 @@ pub fn draw_ui(this) {
     // is no scene to draw behind it and no dock to put over it.
     if manager::showing(S) {
         manager::draw(S, S.theme);
+        if S.show_input {
+            inputview::draw(S);
+        }
         return;
     }
     // Stage: decide what is showing, size every sheet once, then draw them.
@@ -717,10 +750,6 @@ pub fn draw_view_bonemap(this) {
     bonemap::body(this.S, this.S.theme);
 }
 
-pub fn draw_view_statemachine(this) {
-    statemachine::body(this.S, this.S.theme);
-}
-
 pub fn draw_dock_tools_left(this) {
     docks::draw_tools(this.S, this.S.theme, "left");
 }
@@ -735,12 +764,28 @@ pub fn draw_dock_tools_bottom(this) {
 
 // One hatch for every row the inspector's pool draws itself; the cursor in
 // `inspector` keeps the calls in step with the rows that pushed them.
+pub fn draw_about_update(this) {
+    about::draw_update(this.S);
+}
+
 pub fn draw_form_row(this) {
     inspector::draw_row(this.S);
 }
 
 pub fn draw_dock_bottom(this) {
     docks::draw_bottom_body(this.S, this.S.theme);
+}
+
+pub fn draw_manager_body(this) {
+    manager::draw_body(this.S, this.S.theme);
+}
+
+pub fn draw_sheet_actions(this) {
+    crate::window::draw_actions(this.S);
+}
+
+pub fn draw_sheet_body(this) {
+    crate::window::draw_body(this.S);
 }
 
 // The outliner's context menu, one method a row. The right click that opened

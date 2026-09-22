@@ -99,6 +99,7 @@ being built, marked `done`, never back in the shipped one.
 | **Rune compiled to WebAssembly** — a script unit built to a `.wasm` module ahead of time and run over the same host calls, in place of the interpreter. | 0.7 | no plan |
 | **Extensions in WebAssembly** — a third tier beside the Rust and C ones: a `.wasm` module over `wasmtime` natively and the browser's own engine on the web. | 1.1 | [PLAN-wasm-extensions.md](PLAN-wasm-extensions.md) |
 | **`#[export]` on a script constant** — in place of the `exports` table. | (0.5) | [PLAN-scripting.md](PLAN-scripting.md) |
+| **Properties that hold properties** — a `list`, a `map` and a `record` a component or a script exports, drawn a row an entry in the inspector. | 0.2 done | [PLAN-property-types.md](PLAN-property-types.md) |
 
 ## Physics and animation
 
@@ -138,7 +139,7 @@ being built, marked `done`, never back in the shipped one.
 
 | Item | Milestone | Plan |
 | --- | :-: | --- |
-| **Widgets, text and the batteries** — nineteen widget kinds over cosmic-text, containers that hand out rects, text, and the batteries: audio buses, input actions, saves, localisation. | 0.1 done | no plan |
+| **Widgets, text and the batteries** — thirty-one widget kinds over cosmic-text, containers that hand out rects, text, and the batteries: audio buses, input actions, saves, localisation. | 0.1 done | no plan |
 | **Lists, trees and tables** — `list`, `tree` and `table` kinds with many rows selected, columns a drag resizes, and only the rows in view built. | 0.2 done | [PLAN-widgets.md#data-views](PLAN-widgets.md#data-views) |
 | **Menus, popups and tooltips** — a menu bar with submenus, a context menu a right click or a long press opens, shortcuts on rows, and a toast. | 0.2 done | [PLAN-widgets.md#menus-and-popups](PLAN-widgets.md#menus-and-popups) |
 | **Text a game can edit** — a `text_area`, a `code` kind with the editor's gutter, a `drag_value` with arrows and units, labels a drag selects, and `[url]` and `[hint]` marks. | 0.2 done | [PLAN-widgets.md#text](PLAN-widgets.md#text) |
@@ -163,7 +164,9 @@ can do today, in the batches it would be built in.
 | **Decals and volumetric fog** — a `decal` component projected onto the depth buffer, and fog a light throws shafts through. | 0.4 | [PLAN-3d-rendering.md](PLAN-3d-rendering.md) |
 | **Lit normal-mapped sprites** — 2D lights and shadows are built, and the normal map is what is left. | 0.3 | [PLAN-rendering.md](PLAN-rendering.md) |
 | **Particles in 3D** — `particles3d`, and in both dimensions: emission shapes, attractors, colliders, trails, sub-emitters, lit particles and a compute stepper. | 0.3 | [PLAN-particles.md](PLAN-particles.md) |
-| **Culling and level of detail** — frustum culling and `render.in_view`, cull masks, automatic instancing, MSAA, level of detail in the mesh asset, 2D batching and `multimesh`. | 0.3 | [PLAN-views-and-culling.md](PLAN-views-and-culling.md) |
+| **2D batching** — `balaur_render` draws the sprites and shapes that share a texture and a material in one call rather than one each. | 0.2 done | [PLAN-views-and-culling.md](PLAN-views-and-culling.md) |
+| **Automatic instancing** — meshes sharing geometry, a texture and a material draw as one call with an instance each. | 0.2 done | [PLAN-views-and-culling.md](PLAN-views-and-culling.md) |
+| **Culling and level of detail** — frustum culling and `render.in_view`, cull masks, MSAA, level of detail in the mesh asset, and `multimesh`. | 0.3 | [PLAN-views-and-culling.md](PLAN-views-and-culling.md) |
 | **Voxels and terrain** — block types in a `voxel_set`, a greedy chunk mesher, a chunked grid file, a Voxels tool, `.vox` import, and heightfield meshing. | 0.3 | [PLAN-voxels.md](PLAN-voxels.md) |
 | **More than one view** — a `viewport` component for split screen, a camera rendered to a texture, and picture-in-picture. | 0.3 | [PLAN-views-and-culling.md](PLAN-views-and-culling.md) |
 | **Video playback** — a movie on a texture with its audio on a bus, render-side only. | 0.3 | no plan |
@@ -180,7 +183,7 @@ can do today, in the batches it would be built in.
 | --- | :-: | --- |
 | **The deterministic core** — a fixed 60 Hz step, a per-tick digest checked across operating systems, record, replay and rollback, and three transports behind one trait. | 0.1 done | no plan |
 | **WebTransport in the browser** — native QUIC datagrams, binary frames, stable ids and rollback are built, and the browser side is not. | 0.4 | [PLAN-networking.md#2-transports](PLAN-networking.md#2-transports) |
-| **Multiplayer from a script** — a `multiplayer` module to host, join and leave a match from Rune, on a player's machine or a headless server. | 0.2 | [PLAN-multiplayer.md](PLAN-multiplayer.md) |
+| **Multiplayer from a script** — a `multiplayer` module to host, join and leave a match from Rune, on a player's machine or a headless server. | 0.4 | [PLAN-multiplayer.md](PLAN-multiplayer.md) |
 | **Late join, reconnect and host migration** — under lockstep, out of the snapshot ring. | 0.4 | [PLAN-multiplayer.md#3-steps](PLAN-multiplayer.md#3-steps) |
 | **State replication and RPC** — deltas generated off the component registry, addressed by `StableId` rather than by path. | 0.4 | [PLAN-networking.md#3-steps](PLAN-networking.md#3-steps) |
 | **Client prediction and reconciliation** — the client runs ahead and is corrected against the server, with nodes it does not own interpolated a send interval behind. | 0.4 | [PLAN-networking.md#hiding-latency](PLAN-networking.md#hiding-latency) |

@@ -279,6 +279,31 @@ fn a_bad_schema_is_rejected_at_registration() {
             "a colour that is not a colour",
             "not #rrggbb",
         ),
+        (
+            r#"label = { type = "list", default = [] }"#,
+            "a list that does not say what it holds",
+            "needs an `of` key",
+        ),
+        (
+            r#"label = { type = "string", default = "x", of = { type = "int" } }"#,
+            "`of` on a type that holds nothing",
+            "belongs to a `list` or a `map`",
+        ),
+        (
+            r#"label = { type = "list", of = { type = "int" }, default = [1, "two"] }"#,
+            "a list entry of another type",
+            "entry 1",
+        ),
+        (
+            r#"label = { type = "map", key = "int", of = { type = "string" }, default = { x = "1" } }"#,
+            "a map key that is not the number it promised",
+            "not a whole number",
+        ),
+        (
+            r#"label = { type = "record", fields = { hp = { type = "int" } }, default = { mp = 1 } }"#,
+            "a record default naming no field",
+            "not a declared field",
+        ),
     ];
 
     let hook = std::panic::take_hook();
@@ -320,13 +345,33 @@ fn freeing_a_node_runs_its_remove_hook_and_forgets_it() {
     let e = spawn(&app);
     components::add(&app.engine, e, "marker", None).unwrap();
     let registry = app.engine.resource::<ComponentRegistry>();
-    let bit = 1u128 << registry.borrow().index_of("marker").unwrap();
-    let attached = app.engine.resource::<components::Attached>();
-    assert_eq!(attached.borrow().0.get(&e), Some(&bit));
+    let index = registry.borrow().index_of("marker").unwrap();
+    assert!(components::attached_of(&app.engine, e).has(index));
 
     components::remove_present(&app.engine, e);
     assert!(components::get(&app.engine, e, "marker").is_none());
-    assert!(attached.borrow().0.get(&e).is_none());
+    assert_eq!(
+        components::attached_of(&app.engine, e),
+        components::Attached::default()
+    );
+}
+
+/// The bundle's own `Transform` is on the node without the registry having
+/// put it there, so a free owes no hook for it and a presence test still
+/// answers yes.
+#[test]
+fn the_bundles_transform_is_present_without_being_hooked() {
+    let app = app_with_marker();
+    let e = spawn(&app);
+    let bits = components::attached_of(&app.engine, e);
+    assert_eq!(bits.present, components::TRANSFORM_BIT);
+    assert_eq!(bits.hooked, 0);
+    assert!(components::has(&app.engine, e, "transform"));
+    assert!(
+        components::present_on(&app.engine, e)
+            .iter()
+            .any(|name| name == "transform")
+    );
 }
 
 #[test]
@@ -335,8 +380,9 @@ fn removing_a_component_clears_its_bit() {
     let e = spawn(&app);
     components::add(&app.engine, e, "marker", None).unwrap();
     components::remove(&app.engine, e, "marker").unwrap();
-    let attached = app.engine.resource::<components::Attached>();
-    assert!(attached.borrow().0.get(&e).is_none());
+    let registry = app.engine.resource::<ComponentRegistry>();
+    let index = registry.borrow().index_of("marker").unwrap();
+    assert!(!components::attached_of(&app.engine, e).has(index));
 }
 
 /// A debug build still finds a component attached behind the registry's
@@ -356,8 +402,10 @@ fn a_component_attached_behind_the_registry_is_still_removed_in_debug() {
 
 #[test]
 fn a_bare_array_names_the_one_property_it_could_have_meant() {
-    let schema =
-        ComponentDef::parse_schema("bindings", r#"rows = { type = "strings", default = [] }"#);
+    let schema = ComponentDef::parse_schema(
+        "bindings",
+        r#"rows = { type = "list", of = { type = "string" }, default = [] }"#,
+    );
     let given = toml::Value::Array(vec![]);
     let err = components::merge_defaults(&schema, Some(&given)).unwrap_err();
     assert!(err.to_string().contains("{ rows = [...] }"), "{err}");
@@ -372,4 +420,78 @@ fn a_bare_value_on_a_component_is_an_error() {
     let given = toml::Value::String("static".into());
     let err = components::merge_defaults(&schema, Some(&given)).unwrap_err();
     assert!(err.to_string().contains(r#"{ kind = "static" }"#), "{err}");
+}
+
+/// A component declares its fast paths before it registers, which is the
+/// order every built-in writes them in. The hook has to survive that.
+#[test]
+fn a_property_reader_declared_before_its_component_still_answers() {
+    let app = app_with_marker();
+    let e = spawn(&app);
+    components::add(&app.engine, e, "transform", None).unwrap();
+    let readers = app
+        .engine
+        .try_resource::<components::PropertyReaders>()
+        .expect("the transform registers a reader");
+    let index = components::index_of(&app.engine, "transform").unwrap();
+    assert!(
+        readers.borrow().reads(index),
+        "the reader transform declared before registering was dropped"
+    );
+    assert_eq!(
+        components::property(&app.engine, e, "transform", "position"),
+        components::get(&app.engine, e, "transform").and_then(|t| t.get("position").cloned()),
+        "the fast path and the whole table answer the same"
+    );
+}
+
+/// A nested spec may leave its `default` out, and registration writes the
+/// type's zero in: the inspector needs one to add an entry with.
+#[test]
+fn a_nested_spec_gets_the_default_it_left_out() {
+    let schema = ComponentDef::parse_schema(
+        "waves",
+        r#"counts = { type = "list", of = { type = "int" }, default = [] }
+           crew = { type = "record", fields = { name = { type = "string" }, hp = { type = "int", default = 3 } }, default = {} }"#,
+    );
+    assert_eq!(schema["counts"]["of"]["default"].as_integer(), Some(0));
+    assert_eq!(
+        schema["crew"]["fields"]["name"]["default"].as_str(),
+        Some("")
+    );
+    assert_eq!(
+        schema["crew"]["fields"]["hp"]["default"].as_integer(),
+        Some(3)
+    );
+}
+
+/// A colour is expanded wherever the spec puts it, so a hex string inside a
+/// list reaches `apply` as the floats every hook reads.
+#[test]
+fn a_colour_inside_a_list_is_expanded_like_any_other() {
+    let schema = ComponentDef::parse_schema(
+        "palette",
+        r#"swatches = { type = "list", of = { type = "color" }, default = [] }"#,
+    );
+    let given: toml::Value = toml::from_str(r##"swatches = ["#ff0000"]"##).unwrap();
+    let merged = components::merge_defaults(&schema, Some(&given)).unwrap();
+    let first = &merged["swatches"][0];
+    assert_eq!(first[0].as_float(), Some(1.0), "{merged}");
+    assert_eq!(first[1].as_float(), Some(0.0), "{merged}");
+}
+
+/// A scene naming one of a record's fields still hands `apply` both, and a
+/// record inside a list is filled the same way.
+#[test]
+fn a_record_field_the_scene_left_out_is_filled_in() {
+    let schema = ComponentDef::parse_schema(
+        "spawner",
+        r#"wave = { type = "record", fields = { hp = { type = "int", default = 3 }, name = { type = "string", default = "grunt" } }, default = {} }
+           waves = { type = "list", of = { type = "record", fields = { hp = { type = "int", default = 1 } } }, default = [] }"#,
+    );
+    let given: toml::Value = toml::from_str("wave = { hp = 9 }\nwaves = [{ }]").unwrap();
+    let merged = components::merge_defaults(&schema, Some(&given)).unwrap();
+    assert_eq!(merged["wave"]["hp"].as_integer(), Some(9), "{merged}");
+    assert_eq!(merged["wave"]["name"].as_str(), Some("grunt"), "{merged}");
+    assert_eq!(merged["waves"][0]["hp"].as_integer(), Some(1), "{merged}");
 }

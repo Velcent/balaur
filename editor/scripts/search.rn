@@ -16,6 +16,16 @@ pub fn field(S, k, id, placeholder, width) {
     text
 }
 
+/// A search control a pooled strip holds, rather than one drawn: the same
+/// state under the same `id`, so `query` answers for either.
+pub fn control(S, id, placeholder, width) {
+    #{
+        kind: "field", role: "chrome_field", width: width,
+        text: S.search.get(id).unwrap_or(""), placeholder: placeholder,
+        on: |text| { S.search[id] = text; },
+    }
+}
+
 /// The query a dock is filtering by, "" when it is not.
 pub fn query(S, id) {
     S.search.get(id).unwrap_or("")
@@ -40,5 +50,10 @@ pub fn matches(query, text) {
 /// A line the dock shows when a filter left nothing, so an empty list reads
 /// as "nothing matched" rather than "nothing exists".
 pub fn nothing(k, query) {
-    ui::label(format!("nothing matches \"{}\"", query), style::mono_sm(k.faint));
+    ui::label(nothing_says(query), style::mono_sm(k.faint));
+}
+
+/// The same line as text, for a caller putting it on a node.
+pub fn nothing_says(query) {
+    format!("nothing matches \"{}\"", query)
 }

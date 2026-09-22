@@ -18,6 +18,10 @@ env:
   # a plain local `cargo test` skips them; CI always runs everything.
   BALAUR_E2E: "1"
 
+  # Software Vulkan for the Windows runner. Pinned: a Mesa that changes under
+  # a render step is a difference nobody can explain afterwards.
+  MESA_VERSION: "26.2.0"
+
 concurrency:
   group: test-${{ github.ref }}
   cancel-in-progress: true
@@ -39,7 +43,8 @@ jobs:
         with:
           node-version: 24
       # Audio and input for the headless build; X11/Wayland/xkb for the
-      # windowed one, which links winit.
+      # windowed one, which links winit; Mesa's Vulkan for the render steps,
+      # which ask a runner with no GPU for a device.
       - name: Linux build deps
         if: runner.os == 'Linux'
         run: |
@@ -50,7 +55,34 @@ jobs:
           sudo apt-get install -y \
             libasound2-dev libudev-dev \
             libx11-dev libxcursor-dev libxrandr-dev libxi-dev \
-            libxkbcommon-dev libwayland-dev
+            libxkbcommon-dev libwayland-dev \
+            libvulkan1 mesa-vulkan-drivers
+      # The same software Vulkan, in its Windows spelling: the runner has the
+      # loader and no driver, and the GL fallback answers 1.1, not 3.3.
+      - name: Windows software GPU
+        if: runner.os == 'Windows'
+        # pwsh, alone in a file of bash: registering the driver means a
+        # native path and a `/v` flag, and Git Bash rewrites both.
+        shell: pwsh
+        run: |
+          curl.exe -sSL --retry 3 -o mesa.7z `
+            "https://github.com/pal1000/mesa-dist-win/releases/download/${env:MESA_VERSION}/mesa3d-${env:MESA_VERSION}-release-msvc.7z"
+          # The manifest names its library relatively, so the two stay together.
+          7z x mesa.7z -omesa x64/vulkan_lvp.dll x64/lvp_icd.x86_64.json `
+            x64/opengl32.dll x64/libgallium_wgl.dll
+          $icd = (Resolve-Path mesa/x64/lvp_icd.x86_64.json).Path
+          # The registry, not VK_DRIVER_FILES: the loader ignored the variable
+          # and looked here, which is what `Found no drivers!` was reporting.
+          $key = 'HKLM:\SOFTWARE\Khronos\Vulkan\Drivers'
+          New-Item -Path $key -Force | Out-Null
+          New-ItemProperty -Path $key -Name $icd -PropertyType DWord -Value 0 -Force | Out-Null
+          Get-ItemProperty -Path $key
+          # And GL, because wgpu enumerates every backend: this runner's is
+          # the 1.1 GDI one, and the render died right after saying so. An
+          # app-local opengl32.dll answers 4.6, beside the binary e2e.sh runs.
+          New-Item -ItemType Directory -Force -Path target/e2e/bin | Out-Null
+          Copy-Item mesa/x64/opengl32.dll, mesa/x64/libgallium_wgl.dll target/e2e/bin/
+          "GALLIUM_DRIVER=llvmpipe" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -76,9 +108,10 @@ jobs:
         run: |
           cargo build -p balaur_cli --no-default-features
           cargo test -p balaur_core -p balaur_physics --no-default-features
-      # examples/ are Balaur projects, not cargo examples: run, export and play
-      # each one. See scripts/e2e.sh for why all three are needed.
-      - name: E2E — run, export, play and edit every example project
+      # examples/ are Balaur projects, not cargo examples: run, export, play,
+      # edit and render each one. See scripts/e2e.sh for why all five are
+      # needed.
+      - name: E2E — run, export, play, edit and render every example project
         shell: bash
         run: ./scripts/e2e.sh
       - name: Upload pack digests
@@ -158,13 +191,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      # The same set the test job takes: coverage runs the e2e suite, which
+      # renders on a real adapter, and a runner without the software Vulkan
+      # driver has none to find.
       - name: Linux build deps
         run: |
           # The image's Chrome and Microsoft repos, which nothing here installs
           # from: a hash mismatch in one fails the whole `apt-get update`.
           sudo rm -f /etc/apt/sources.list.d/*{google,microsoft}*
           sudo apt-get update
-          sudo apt-get install -y libasound2-dev libudev-dev
+          sudo apt-get install -y \
+            libasound2-dev libudev-dev \
+            libx11-dev libxcursor-dev libxrandr-dev libxi-dev \
+            libxkbcommon-dev libwayland-dev \
+            libvulkan1 mesa-vulkan-drivers
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}

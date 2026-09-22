@@ -12,7 +12,7 @@ fn carrier(kind) {
     if kind == "drag_value" || kind == "slider" || kind == "progress" {
         return "value";
     }
-    if kind == "check" {
+    if kind == "check" || kind == "switch" {
         return "checked";
     }
     if kind == "field" || kind == "dropdown" || kind == "text_area" || kind == "list" {
@@ -50,6 +50,38 @@ fn remember(S, host, key, value) {
     S.pool[host] = table;
 }
 
+// Write a widget only when what is asked for differs from what was asked for
+// last pass. A patch rebuilds the widget and dirties the layout, and a shell
+// that did not change asks for the same table every frame.
+fn patched(S, host, key, node, set) {
+    let table = memo(S, host);
+    let mark = key + "#";
+    if table.get(mark) == Some(set) {
+        return;
+    }
+    table[mark] = set;
+    S.pool[host] = table;
+    // A patch keeps every key the new table leaves out, so a pooled slot that
+    // changes kind or role wears the last one's. Replacing it drops them.
+    let wanted = set.get("kind");
+    let swapped = match wanted {
+        Some(kind) => kind != node.get_component("widget", "kind")
+            || set.get("role").unwrap_or("") != node.get_component("widget", "role"),
+        None => false,
+    };
+    if swapped {
+        node.set_component("widget", set);
+    } else {
+        node.patch_component("widget", set);
+    }
+}
+
+// Forget what a host was asked for: a node just made holds none of it, and a
+// reader's edit is a value the next pass has to write over.
+fn forget(S, host) {
+    S.pool[host] = #{};
+}
+
 // A label's line where a row is stacked: the label role's text and its air.
 const LABEL_H = 16.0;
 
@@ -62,8 +94,10 @@ fn make_row(host, index) {
     label.set_component("widget", #{ kind: "label", role: "label" });
     let column = row.add_child("H");
     column.set_component("widget", #{ kind: "row", gap: 0, grow: 1 });
+    // No `gap`: the row's `slot_role` carries it, and a number here would win
+    // over the theme.
     let slot = column.add_child("C");
-    slot.set_component("widget", #{ kind: "row", gap: 1, grow: 1 });
+    slot.set_component("widget", #{ kind: "row", grow: 1 });
     let hatch = column.add_child("D");
     hatch.set_component("widget", #{ kind: "draw", visible: false, grow: 1 });
     row
@@ -85,6 +119,9 @@ fn control_at(slot, index) {
 ///
 /// Read before write, because a node reports the frame before: the value on
 /// it now is either what this wrote or the reader's edit over the top.
+///
+/// `on` hears every change; `on_submit` hears only Enter and a field losing
+/// focus, which is what a row writing a path wants.
 fn apply_control(S, host, key, node, want) {
     let kind = want.get("kind").unwrap_or("label");
     let carries = carrier(kind);
@@ -92,19 +129,28 @@ fn apply_control(S, host, key, node, want) {
     // node the next selection gives another kind left a value of another type
     // under its slot, and comparing across the two is not a comparison.
     let held = format!("{}:{}", key, carries);
-    let params = util::obj(node.get_component("widget"));
     let fired = false;
-    // A press is not a value: it is true for one frame and the layer clears
-    // it, so there is nothing to remember and nothing to write back.
+    // A submit is a press with a value: true for one frame, and the text the
+    // reader left. Read before the value below, so a row that writes on Enter
+    // hears it rather than every keystroke.
+    if node.get_component("widget", "submitted") == true {
+        let found = want.get("on_submit");
+        if let Some(act) = found {
+            act(node.get_component("widget", "text"));
+        }
+    }
+    // One property rather than the table, which is forty keys the pool has no
+    // use for. A press is not a value: it is true for one frame and the layer
+    // clears it, so there is nothing to write back.
     if carries == "clicked" {
-        if params["clicked"] == true {
+        if node.get_component("widget", "clicked") == true {
             let found = want.get("on");
             if let Some(act) = found {
                 act(true);
             }
         }
     } else if carries != "" {
-        let seen = params[carries];
+        let seen = node.get_component("widget", carries);
         let table = memo(S, host);
         let before = table.get(held);
         let known = match before {
@@ -124,15 +170,20 @@ fn apply_control(S, host, key, node, want) {
     }
     let set = util::merge(want, #{ visible: true });
     set.remove("on");
+    set.remove("on_submit");
     set.remove("clicked");
+    set.remove("submitted");
     if fired {
         set.remove(carries);
+        // The reader's value is on the node and not in `set`, so the pass
+        // after this one has to write rather than match what it wrote before.
+        forget(S, host);
     }
-    node.patch_component("widget", set);
+    patched(S, host, key, node, set);
     // Remembered as the node holds it, not as it was asked for: a float goes
     // through the component as an f32, and 0.2 does not come back as 0.2.
     if carries != "" && carries != "clicked" && !fired {
-        remember(S, host, held, util::obj(node.get_component("widget"))[carries]);
+        remember(S, host, held, node.get_component("widget", carries));
     }
 }
 
@@ -140,7 +191,12 @@ fn apply_control(S, host, key, node, want) {
 /// patched rather than set, so a key this frame's control leaves out would
 /// otherwise keep last frame's: a spacer that becomes a label draws it six
 /// pixels wide, which is one letter and an ellipsis.
-const SHAPELESS = #{ width: 0, height: 0, grow: 0, radius: -1, fill: "", tooltip: "" };
+const SHAPELESS = #{
+    width: 0, height: 0, grow: 0, radius: -1, fill: "", tooltip: "",
+    // `text` too: a pooled node is made as a label, whose text is "label" by
+    // default, and a spacer or a hatch that names none would wear it.
+    text: "",
+};
 
 /// Fill a row of controls, one node each, making and hiding as needed.
 ///
@@ -152,8 +208,17 @@ pub fn strip(S, host_path, controls) {
     if util::is_nil(host) {
         return;
     }
-    host.patch_component("widget", #{ visible: true });
+    patched(S, host_path, "host", host, #{ visible: true });
+    fill_children(S, host_path, host, controls);
+}
+
+/// Put `controls` on a host's children, making what is missing and hiding
+/// what is spare. What `strip` does once it knows the list.
+fn fill_children(S, host_path, host, controls) {
     let made = host.children().len();
+    if made < controls.len() {
+        forget(S, host_path);
+    }
     while made < controls.len() {
         let node = host.add_child(format!("C{}", made));
         node.set_component("widget", #{ kind: "label" });
@@ -161,7 +226,7 @@ pub fn strip(S, host_path, controls) {
     }
     for (i, node) in host.children().iter().enumerate() {
         if i >= controls.len() {
-            node.patch_component("widget", #{ visible: false });
+            patched(S, host_path, format!("{}", i), node, #{ visible: false });
             continue;
         }
         // A control that carries its own controls is a group: one box with no
@@ -177,27 +242,44 @@ pub fn strip(S, host_path, controls) {
 }
 
 fn group(S, host, i, node, want, inner) {
-    let set = util::merge(want, #{ kind: "row", visible: true, gap: 0 });
+    // A group states its own kind where it is a column of rows rather than a
+    // row of controls; `row` is what a tile and its mark are.
+    let set = util::merge(#{ kind: "row", gap: 0 }, want);
+    set.visible = true;
     set.remove("controls");
-    node.patch_component("widget", set);
+    patched(S, host, format!("{}", i), node, set);
     let made = node.children().len();
+    if made < inner.len() {
+        forget(S, host);
+    }
     while made < inner.len() {
         let kid = node.add_child(format!("C{}", made));
         kid.set_component("widget", #{ kind: "label" });
         made += 1;
     }
     for (n, kid) in node.children().iter().enumerate() {
+        let key = format!("{}:{}", i, n);
         if n >= inner.len() {
-            kid.patch_component("widget", #{ visible: false });
+            patched(S, host, key, kid, #{ visible: false });
             continue;
         }
-        apply_control(S, host, format!("{}:{}", i, n), kid, util::merge(SHAPELESS, inner[n]));
+        // Groups nest: a project row is a column of two rows, and each of
+        // those is a row of controls.
+        let held = util::merge(SHAPELESS, inner[n]);
+        let deeper = held.get("controls");
+        match deeper {
+            Some(deeper) => group(S, host, key, kid, held, deeper),
+            None => apply_control(S, host, key, kid, held),
+        }
     }
 }
 
 /// Put `specs` on the host's children, making what is missing and hiding what
 /// is spare. A spec is `#{ label, controls }`, and a control is a widget
 /// property table plus an `on` the pool calls with the reader's edit.
+///
+/// `slot_role` dresses the row's control column, so the air between a caret
+/// and the heading beside it is a theme entry rather than a number here.
 ///
 /// The rows are as wide as the host: `stacked` puts each label above its
 /// control column instead of beside it, for a host too narrow for both.
@@ -206,15 +288,18 @@ pub fn sync(S, host_path, specs, label_w, stacked) {
     if util::is_nil(host) {
         return;
     }
-    host.patch_component("widget", #{ visible: true });
+    patched(S, host_path, "host", host, #{ visible: true });
     let made = host.children().len();
+    if made < specs.len() {
+        forget(S, host_path);
+    }
     while made < specs.len() {
         make_row(host, made);
         made += 1;
     }
     for (i, row) in host.children().iter().enumerate() {
         if i >= specs.len() {
-            row.patch_component("widget", #{ visible: false });
+            patched(S, host_path, format!("r{}", i), row, #{ visible: false });
             continue;
         }
         let spec = specs[i];
@@ -223,16 +308,25 @@ pub fn sync(S, host_path, specs, label_w, stacked) {
         // Stacked, a labelled row is a column of its label and its control
         // column, a label's line taller; a full or unlabelled row spans both.
         let stack = stacked && !full && text != "";
+        // A spec naming no height hugs what is in it, which is what a line
+        // of help needs: how tall it is follows from the width it got.
         let h = util::f(spec.get("height").unwrap_or(24.0));
-        row.patch_component("widget", #{
+        let tall = if h <= 0.0 {
+            0.0
+        } else if stack {
+            h + LABEL_H + 2.0
+        } else {
+            h
+        };
+        patched(S, host_path, format!("r{}", i), row, #{
             visible: true,
             kind: if stack { "column" } else { "row" },
             gap: if stack { 2 } else { 6 },
-            height: if stack { h + LABEL_H + 2.0 } else { h },
+            height: tall,
         });
         let label = row.get_node("L");
         if !util::is_nil(label) {
-            label.patch_component("widget", #{
+            patched(S, host_path, format!("r{}:L", i), label, #{
                 visible: !full && (text != "" || !stacked),
                 text: text,
                 width: if stack { 0.0 } else { label_w },
@@ -250,35 +344,52 @@ pub fn sync(S, host_path, specs, label_w, stacked) {
         let drawn = spec.get("draw");
         let hatch = column.get_node("D");
         if !util::is_nil(hatch) {
-            match drawn {
-                Some(name) => hatch.patch_component("widget", #{ visible: true, draw: name }),
-                None => hatch.patch_component("widget", #{ visible: false }),
-            }
+            let want = match drawn {
+                Some(name) => #{ visible: true, draw: name },
+                None => #{ visible: false },
+            };
+            patched(S, host_path, format!("r{}:D", i), hatch, want);
         }
         let slot = column.get_node("C");
         if util::is_nil(slot) {
             continue;
         }
-        slot.patch_component("widget", #{ visible: drawn.is_none() });
+        patched(S, host_path, format!("r{}:C", i), slot, #{
+            visible: drawn.is_none(),
+            role: spec.get("slot_role").unwrap_or("cells"),
+        });
         if drawn.is_some() {
             continue;
         }
         let controls = util::vec(spec.get("controls").unwrap_or([]));
+        if slot.children().len() < controls.len() {
+            forget(S, host_path);
+        }
         let n = 0;
         while n < controls.len() {
             let node = control_at(slot, n);
-            apply_control(S, host_path, format!("{}:{}", i, n), node, controls[n]);
+            let want = util::merge(SHAPELESS, controls[n]);
+            let key = format!("{}:{}", i, n);
+            // A control carrying controls is a box with others inside it: the
+            // sage frame an instance's prefab path and its verb share.
+            let inner = want.get("controls");
+            match inner {
+                Some(inner) => group(S, host_path, key, node, want, inner),
+                None => apply_control(S, host_path, key, node, want),
+            }
             n += 1;
         }
         // Whatever a longer row left behind. Hidden, not freed: the next
         // selection may be a vector again.
         for (c, node) in slot.children().iter().enumerate() {
             if c >= controls.len() {
-                node.patch_component("widget", #{ visible: false });
+                patched(S, host_path, format!("{}:{}", i, c), node, #{ visible: false });
             }
         }
     }
 }
+
+
 
 /// Stop drawing the whole pool, for a panel that has nothing to show.
 pub fn hide(host_path) {

@@ -365,7 +365,7 @@ pub(crate) fn from_neutral(v: &Neutral) -> Result<rune::Value> {
         Neutral::Bool(b) => rune::to_value(*b)?,
         Neutral::Int(i) => rune::to_value(*i)?,
         Neutral::Num(n) => rune::to_value(*n)?,
-        Neutral::Str(s) => rune::to_value(s.clone())?,
+        Neutral::Str(s) => rune::to_value(s.as_str())?,
         // Rune has its own allocator, so a std `Vec<u8>` crosses by slice.
         Neutral::Bytes(b) => rune::to_value(rune::runtime::Bytes::from_slice(b.as_slice())?)?,
         Neutral::Node(id) => rune::to_value(Node { id: *id })?,

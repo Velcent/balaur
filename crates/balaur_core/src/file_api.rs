@@ -109,7 +109,7 @@ pub(crate) fn fs_read(eng: &Engine, args: &[Value]) -> Result<Value> {
         .read(&path)
         .ok()
         .and_then(|bytes| String::from_utf8(bytes).ok())
-        .map_or(Value::Nil, Value::Str))
+        .map_or(Value::Nil, Value::text))
 }
 
 /// Write a file, making the directory it goes in.
@@ -284,7 +284,7 @@ pub fn from_json(v: &serde_json::Value) -> Result<Value> {
         }
         serde_json::Value::Object(map) => Value::Map(
             map.iter()
-                .map(|(k, val)| Ok((k.clone(), from_json(val)?)))
+                .map(|(k, val)| Ok((k.as_str().into(), from_json(val)?)))
                 .collect::<Result<_>>()?,
         ),
     })

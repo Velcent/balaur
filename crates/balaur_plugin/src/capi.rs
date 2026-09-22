@@ -477,7 +477,7 @@ unsafe fn from_c(value: &BalaurValue) -> Result<Value> {
                 let entry = unsafe { &*map.items.add(index) };
                 let key = unsafe { entry.key.as_str() }
                     .ok_or_else(|| anyhow::anyhow!("extension returned a key that is not UTF-8"))?;
-                pairs.push((key.to_string(), unsafe { from_c(&entry.value) }?));
+                pairs.push((key.into(), unsafe { from_c(&entry.value) }?));
             }
             Value::Map(pairs)
         }

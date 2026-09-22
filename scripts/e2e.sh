@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# End to end over the example projects, four ways, because they fail
+# End to end over the example projects, five ways, because they fail
 # independently:
 #   run     dev mode, straight from the sources
 #   export  twice; the two packs must come out byte-identical
 #   play    the exported pack, with no sources and no compiler present
 #   edit    open it in the editor, which is itself a Balaur project
-# A script error is logged rather than fatal, so a clean exit is not enough:
-# every step reads the log too.
+#   render  the game and the editor surface-less, on a real GPU
+# A script error is logged, not fatal, so every step reads the log too.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -19,9 +19,10 @@ mkdir -p "$out_dir"
 digests="$out_dir/digests.txt"
 : >"$digests"
 
-# Built once, then run directly. `cargo run` re-resolves the workspace and takes
-# the build lock on every call, and the loop below calls once per step.
-cargo build -q -p balaur_cli --bin balaur
+# Built once, then run directly: `cargo run` takes the build lock on every
+# call, and the loop below calls once per step. `--features window` because
+# `--offscreen` falls back to headless without it, checking nothing.
+cargo build -q -p balaur_cli --features window --bin balaur
 built=${CARGO_TARGET_DIR:-target}/debug/balaur
 # A copy of its own: another build writing target/debug/balaur mid-run would
 # swap the binary under every step still to come.
@@ -83,6 +84,24 @@ step() { # step <label> <balaur args...>
   check_run "$label" "$rc" "$out"
 }
 
+# What run_offscreen logs before its first frame. A binary built without the
+# window feature takes `--offscreen` and runs headless anyway, so a step that
+# only read the exit code would pass while rendering nothing.
+RENDERED='rendering .* offscreen at'
+
+render_step() { # render_step <label> <balaur args...>
+  local label=$1
+  shift
+  local out rc
+  set +e
+  out=$(balaur "$@" 2>&1)
+  rc=$?
+  set -e
+  check_run "$label" "$rc" "$out"
+  grep -qE "$RENDERED" <<<"$out" ||
+    fail "$label rendered nothing: build balaur with --features window"
+}
+
 # An invariant the log states but does not call an error: every editor
 # document node must resolve to a node in the engine mirror.
 UNRESOLVED='did not resolve in the mirror'
@@ -90,13 +109,21 @@ UNRESOLVED='did not resolve in the mirror'
 # What a state that ran leaves in the log. See the check at the end of edit_step.
 RAN='selftest ok|\[script\] .*skip|\[script\] showcase '
 
+# A windowed step needs a display, and a Linux CI runner has none: the editor
+# opens offscreen there rather than failing to build an event loop. A scalar
+# rather than an array, which bash 3.2 calls unbound when it is empty.
+offscreen=
+if [ "$(uname)" = Linux ] && [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
+  offscreen=--offscreen
+fi
+
 edit_step() { # edit_step <label> <project> [state]
   local label=$1 project=$2 state=${3:-} out rc
   set +e
   if [ -n "$state" ]; then
-    out=$(balaur edit "$project" --frames 90 --state "$state" 2>&1)
+    out=$(balaur edit "$project" ${offscreen:+"$offscreen"} --frames 90 --state "$state" 2>&1)
   else
-    out=$(balaur edit "$project" --frames 90 2>&1)
+    out=$(balaur edit "$project" ${offscreen:+"$offscreen"} --frames 90 2>&1)
   fi
   rc=$?
   set -e
@@ -177,6 +204,14 @@ for ex in examples/*/; do
 
   printf '  play ...   '
   step "$name: play" play "$out_dir/$name.bpak" --frames 120
+  printf 'ok\n'
+
+  # The GPU, which every step above skips: a texture the backend cannot bind,
+  # a shader it rejects, a material with no pipeline. The editor renders too,
+  # because its own docks and gizmos are where a reader meets a warning.
+  printf '  render ... '
+  render_step "$name: render" run "$ex" --offscreen --frames 120
+  render_step "$name: render in the editor" edit "$ex" --offscreen --frames 90
   printf 'ok\n'
 
   # Headless, so this covers loading the game, mirroring its scene, resolving
@@ -268,6 +303,7 @@ for ex in examples/*/; do
   # written onto one node, and the sparseness that drops it again.
   printf '  props ...  '
   edit_step "$name: props" "$ex" propsdemo
+  edit_step "$name: composites" "$ex" listdemo
   printf 'ok\n'
 
   # Prefabs: an instance's rows are in the tree, an edit inside one becomes an

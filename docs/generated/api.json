@@ -317,7 +317,39 @@
       "rows": {
         "default": [],
         "description": "The binding rows, each `{ event, when, action, target, value }`",
-        "type": "strings"
+        "of": {
+          "default": {
+            "action": "call",
+            "event": "",
+            "target": "",
+            "value": "",
+            "when": ""
+          },
+          "fields": {
+            "action": {
+              "default": "call",
+              "type": "string"
+            },
+            "event": {
+              "default": "",
+              "type": "string"
+            },
+            "target": {
+              "default": "",
+              "type": "string"
+            },
+            "value": {
+              "default": "",
+              "type": "string"
+            },
+            "when": {
+              "default": "",
+              "type": "string"
+            }
+          },
+          "type": "record"
+        },
+        "type": "list"
       }
     },
     "body2d": {
@@ -716,7 +748,11 @@
       "post": {
         "default": [],
         "description": "The frame's passes, in order. bloom, ssao, ssr, dof, fxaa, sharpen, tonemap, vignette, aberration, grain, pixelate name the engine's own -- `ssao`, `ssr` and `dof` are 3D only, and where each physically runs is fixed by the pipeline. Any other name is a `material` asset drawn over the whole frame, and those run in the order given. `tonemap` is where the film becomes a picture: a material before it works in linear light and is what blooms, one after it works on the finished frame, and a list that does not name it has it at the head",
-        "type": "strings"
+        "of": {
+          "default": "",
+          "type": "string"
+        },
+        "type": "list"
       },
       "ssao_bias": {
         "default": 0.025,
@@ -811,7 +847,11 @@
       "post": {
         "default": [],
         "description": "The frame's passes, in order. bloom, ssao, ssr, dof, fxaa, sharpen, tonemap, vignette, aberration, grain, pixelate name the engine's own -- `ssao`, `ssr` and `dof` are 3D only, and where each physically runs is fixed by the pipeline. Any other name is a `material` asset drawn over the whole frame, and those run in the order given. `tonemap` is where the film becomes a picture: a material before it works in linear light and is what blooms, one after it works on the finished frame, and a list that does not name it has it at the head",
-        "type": "strings"
+        "of": {
+          "default": "",
+          "type": "string"
+        },
+        "type": "list"
       },
       "ssao_bias": {
         "default": 0.025,
@@ -4419,7 +4459,11 @@
         "default": [],
         "description": "The lines a `code` widget dots in its gutter, counting from 1; whole numbers or the text of them. A click on the gutter reports its line through `on_gutter` and the script decides what the mark means",
         "group": "value",
-        "type": "strings"
+        "of": {
+          "default": "",
+          "type": "string"
+        },
+        "type": "list"
       },
       "checked": {
         "default": false,
@@ -4631,6 +4675,12 @@
         "group": "paint",
         "type": "string"
       },
+      "icon_color": {
+        "default": "",
+        "description": "What that glyph is tinted with, as `#rrggbb` or a name from the theme's `[colors]`; empty takes the role's own",
+        "group": "paint",
+        "type": "string"
+      },
       "inset": {
         "default": [
           0.0,
@@ -4678,6 +4728,7 @@
           "field",
           "text_area",
           "check",
+          "switch",
           "color",
           "dropdown",
           "menu",
@@ -4808,7 +4859,11 @@
         "default": [],
         "description": "The items a `dropdown`, `menu`, `list`, `tree` or `table` holds; `text` is the one picked, except on a `menu` where it is the button caption. A `tree` row starts with one tab per level, a `list` or `tree` row splits on U+001F into icon, label, a trailing note, an `#rrggbb` for that row and a key that is never drawn, which two rows with the same label need to stay two rows, and a `table` row splits on the same into one cell a column. `on_change` hears every pick",
         "group": "value",
-        "type": "strings"
+        "of": {
+          "default": "",
+          "type": "string"
+        },
+        "type": "list"
       },
       "padding": {
         "default": [
@@ -4855,7 +4910,11 @@
         "default": [],
         "description": "The lines a `code` widget underlines as errors, counting from 1, each also marked on the inner edge of its gutter",
         "group": "value",
-        "type": "strings"
+        "of": {
+          "default": "",
+          "type": "string"
+        },
+        "type": "list"
       },
       "radius": {
         "default": -1.0,
@@ -4889,10 +4948,16 @@
         "type": "float"
       },
       "safe_area": {
-        "default": false,
-        "description": "Keep this root clear of what a notch, a status bar or a home bar covers. Off by default: a backdrop is meant to reach the edge and a control is not",
+        "default": [],
+        "description": "The edges this root keeps clear of what a notch, a status bar or a home bar covers. Empty by default: a backdrop is meant to reach the edge and a control is not, and a screen often wants content above the notch and its background under the gesture bar",
         "group": "placement",
-        "type": "bool"
+        "options": [
+          "left",
+          "top",
+          "right",
+          "bottom"
+        ],
+        "type": "flags"
       },
       "secret": {
         "default": false,
@@ -4910,7 +4975,11 @@
         "default": [],
         "description": "The rows a `list`, `tree` or `table` has picked, one of them where it holds one. `text` is the last row clicked, which is where a shift range measures from; `on_change` hears the whole list where the widget holds many, and the row where it holds one",
         "group": "value",
-        "type": "strings"
+        "of": {
+          "default": "",
+          "type": "string"
+        },
+        "type": "list"
       },
       "shortcut": {
         "default": "",
@@ -4965,6 +5034,12 @@
         "group": "paint",
         "type": "string"
       },
+      "submitted": {
+        "default": false,
+        "description": "True for the one frame a `field` was submitted, the way `clicked` reports a press",
+        "group": "events",
+        "type": "bool"
+      },
       "suffix": {
         "default": "",
         "description": "Units drawn after a `drag_value`'s number, the way `placeholder` is drawn before it",
@@ -5015,7 +5090,11 @@
         "default": [],
         "description": "A `table`'s column names, in order, and with them how many columns it has: a name ending in `>` draws its column against the right edge, which is what a column of numbers wants. None takes the first row as the names",
         "group": "value",
-        "type": "strings"
+        "of": {
+          "default": "",
+          "type": "string"
+        },
+        "type": "list"
       },
       "toggle": {
         "default": false,
@@ -5035,6 +5114,12 @@
         "group": "type",
         "type": "string"
       },
+      "truncate": {
+        "default": false,
+        "description": "Cut a caption too long for the width the widget was given and end it with an ellipsis, rather than clip it mid-glyph",
+        "group": "type",
+        "type": "bool"
+      },
       "value": {
         "default": 0.0,
         "description": "Where a `slider`, `drag_value` or `progress` stands, between `min` and `max`; a slider and a drag value write it and call `on_change` with it",
@@ -5049,7 +5134,11 @@
         "default": [],
         "description": "The lines a `code` widget underlines as warnings, counting from 1; an error on the same line outranks it",
         "group": "value",
-        "type": "strings"
+        "of": {
+          "default": "",
+          "type": "string"
+        },
+        "type": "list"
       },
       "width": {
         "default": 0.0,
@@ -5062,7 +5151,11 @@
         "default": [],
         "description": "Each `table` column's share of the width, in the order `titles` names them: `[\"2\", \"1\", \"1\"]` gives the first half and the other two a quarter each. Numbers and the text of them both; empty divides the width evenly, and a drag on a seam in the header writes the shares back",
         "group": "layout",
-        "type": "strings"
+        "of": {
+          "default": "",
+          "type": "string"
+        },
+        "type": "list"
       },
       "wrap": {
         "default": false,
@@ -7420,7 +7513,7 @@
         "descendants": "Every node under this one, in tree order, the node itself excluded.",
         "detach_script": "Drop the script instance on this node, so no further lifecycle call reaches it; the node and its components stay.",
         "emit": "Emit an event from this node, delivered at the top of the next frame to whoever subscribed to `name` on this node, and to whoever subscribed to `name` from anyone. `call` is the twin that reaches one known script, now.",
-        "get_component": "The named component's properties as a table, nil when the node does not carry it.",
+        "get_component": "The named component's properties as a table, nil when the node does not carry it. With a key, that one property rather than the table, which is what a caller reading a single value should ask for.",
         "get_node": "The node at an `A/B/C` path relative to this one, `..` climbing to the parent; nil when nothing matches.",
         "global_material": "The material the node draws with: its own, or the nearest ancestor's. Empty is the built-in one.",
         "global_position": "The node's position in world space, as of the last transform sync.",
@@ -7455,7 +7548,7 @@
         "set_process": "Set when the node and its subtree tick. \"always\" runs through a pause, which is what a pause menu is; \"when_paused\" runs only while paused; \"disabled\" never runs; \"inherit\" goes back to the parent's. Physics is one world and is held whole by a pause whatever this says.",
         "set_sibling_index": "Move the node to that place among its siblings, clamped to the end. Order is draw order in a `row` or a `column`, and tree order in the digest.",
         "set_tint": "Multiply a colour into everything the node and its subtree draw, alpha included, one meaning untinted. A renderable's own `color` is the node's alone; this is the one that inherits.",
-        "set_visible": "Show or hide the node and everything under it. Physics is untouched: a hidden collider still collides.",
+        "set_visible": "Show or hide the node and everything under it, emitting `visibility_changed` with the new value when the flag moves. Physics is untouched: a hidden collider still collides.",
         "set_z_index": "Put the node and its subtree on a draw layer: higher draws later. Relative by default, adding to the parent's layer; false makes it absolute.",
         "sibling_index": "Where the node sits among its parent's children, counting from zero; 0 at the root.",
         "stable_id": "The node's stable id: what a scene file declared, or what it was given when it was spawned. Survives rename and reparent, which a path does not.",
@@ -7537,7 +7630,7 @@
         "descendants": "()",
         "detach_script": "()",
         "emit": "(name: string, payload: any?)",
-        "get_component": "(component: string)",
+        "get_component": "(component: string, key: string?)",
         "get_node": "(path: string)",
         "global_material": "(node)",
         "global_position": "()",
@@ -9460,7 +9553,7 @@
         "rename": "Every file a rename would rewrite, as `[#{ file, source }]`; nothing is written, so a caller can show the list first.",
         "replace": "Every file a find and replace would rewrite, as `[#{ file, source }]`; nothing is written, so a caller can show the list first.",
         "require": "Load another script file as a module, compiled once and shared by every caller afterwards.",
-        "shared": "Wrap a script function so it can be called from several places with a fixed argument count.",
+        "shared": "Wrap a script function so another script's code can call it, with whatever arguments the caller brings.",
         "signature": "The call the caret is inside, as `#{ title, detail, doc, active }`, where `active` is the argument being typed.",
         "store": "Keep any value under a key for as long as the app runs, held by reference: state no node owns, like a class's static variable.",
         "stored": "What `store` kept under a key, the same value rather than a copy; nil when nothing was.",
@@ -9503,7 +9596,7 @@
         "rename": "(path: string, source: string, from: string, to: string)",
         "replace": "(path: string, source: string, from: string, to: string)",
         "require": "(path: string)",
-        "shared": "(f: fn, arity: int)",
+        "shared": "(f: fn)",
         "signature": "(path: string, source: string, line: int, column: int)",
         "store": "(key: string, value: any)",
         "stored": "(key: string)",
@@ -9894,6 +9987,10 @@
           "value": "stack"
         },
         {
+          "name": "WIDGET_SWITCH",
+          "value": "switch"
+        },
+        {
           "name": "WIDGET_TAB",
           "value": "tab"
         },
@@ -9954,6 +10051,7 @@
         "modal": "Draw the callback in a centered dialog over a dimming scrim; true on the frame the scrim was clicked. `width`, `height` and `top` size and place it, `fill`, `stroke` and `scrim` colour it; height follows the content when it is not given.",
         "overlay": "Draw the callback in a foreground area at `x`/`y` design pixels, above the panels and the widget layer. `w`/`h` fix its size, and `fill`, `stroke`, `radius` and padding make it a sheet. `interactive = false` for one that is only read, which hands its clicks to what is behind it.",
         "pill": "Draw a rounded button, or a left-aligned row when `align = \"left\"`; true on the frame it was clicked. `disabled` greys it out and swallows the click. `menu` hangs a right-click menu off it, `menu_click` one that opens on a left click.",
+        "pill_rect": "Where the last `pill` was drawn, as `#{ x, y, w, h }` in design pixels; empty before one has. An immediate control has no node `widget_rect` can be asked about, so a caller that wants to point at one reads it back here, straight after the call that drew it.",
         "rect_stroke": "Outline a rectangle at x/y/w/h design pixels from the current panel's corner, `dashed` when asked.",
         "request_repaint": "Run the UI pass this frame even when lazy; call it every frame something on screen moves without input, such as while the scene plays.",
         "right": "Lay the callback's widgets out against the right edge, still declared left to right.",
@@ -9975,6 +10073,7 @@
         "shortcut": "Whether this chord was pressed this frame, consuming it: modifiers and a key joined by `+`, as in `\"cmd+shift+s\"` or `\"f5\"`. `cmd` is the platform's command key, Command on a Mac and Control everywhere else.",
         "slider": "Draw a horizontal slider between `min` and `max`; returns the value after this frame and whether it moved.",
         "spacing": "Set the gap between the current container's widgets, in design pixels.",
+        "tab_rect": "Where a `tab` page's own button in the strip was last drawn, as `#{ x, y, w, h }` in design pixels; empty before the strip has drawn. `widget_rect` on the same node answers with the page body.",
         "text_field": "Draw a single-line text box keyed by `id`; returns its text, whether it changed, and whether Enter was pressed.",
         "toggle": "Draw an on/off switch; returns the state after this frame and whether it was clicked.",
         "top_panel": "Dock a strip across the top of the window and draw the callback inside it; `height` is in design pixels. Answers the height it ended up with.",
@@ -10020,6 +10119,7 @@
         "modal",
         "overlay",
         "pill",
+        "pill_rect",
         "rect_stroke",
         "request_repaint",
         "right",
@@ -10041,6 +10141,7 @@
         "shortcut",
         "slider",
         "spacing",
+        "tab_rect",
         "text_field",
         "toggle",
         "top_panel",
@@ -10087,6 +10188,7 @@
         "modal": "(String, Option<Value>, CallbackId) -> bool",
         "overlay": "(String, Option<Value>, CallbackId) -> ()",
         "pill": "(String, Option<Value>) -> bool",
+        "pill_rect": "() -> Value",
         "rect_stroke": "(f32, f32, f32, f32, Option<Value>) -> ()",
         "request_repaint": "() -> ()",
         "right": "CallbackId -> ()",
@@ -10108,6 +10210,7 @@
         "shortcut": "String -> bool",
         "slider": "(f32, f32, f32, Option<Value>) -> (f32, bool)",
         "spacing": "(f32, f32) -> ()",
+        "tab_rect": "NodeId -> Value",
         "text_field": "(String, Option<String>, Option<Value>) -> (String, bool, bool)",
         "toggle": "(bool, Option<Value>) -> (bool, bool)",
         "top_panel": "(String, Option<Value>, CallbackId) -> f64",
@@ -10211,6 +10314,525 @@
         "set_keep_awake": "bool -> ()",
         "set_window_mode": "String -> ()"
       }
+    }
+  ],
+  "types": [
+    {
+      "constants": [],
+      "functions": [
+        "new",
+        "with_a",
+        "with_b",
+        "with_g",
+        "with_r"
+      ],
+      "name": "Color"
+    },
+    {
+      "constants": [
+        "MAX",
+        "MIN",
+        "NEG_ONE",
+        "NEG_X",
+        "NEG_Y",
+        "ONE",
+        "X",
+        "Y",
+        "ZERO"
+      ],
+      "functions": [
+        "abs",
+        "as_vec2",
+        "checked_add",
+        "checked_div",
+        "checked_mul",
+        "checked_sub",
+        "clamp",
+        "distance_squared",
+        "div_euclid",
+        "dot",
+        "dot_into_vec",
+        "element_product",
+        "element_sum",
+        "extend",
+        "length_squared",
+        "max",
+        "max_element",
+        "max_position",
+        "min",
+        "min_element",
+        "min_position",
+        "new",
+        "perp",
+        "perp_dot",
+        "rem_euclid",
+        "rotate",
+        "saturating_add",
+        "saturating_div",
+        "saturating_mul",
+        "saturating_sub",
+        "signum",
+        "splat",
+        "to_array",
+        "with_x",
+        "with_y",
+        "wrapping_add",
+        "wrapping_div",
+        "wrapping_mul",
+        "wrapping_sub"
+      ],
+      "name": "IVec2"
+    },
+    {
+      "constants": [
+        "MAX",
+        "MIN",
+        "NEG_ONE",
+        "NEG_X",
+        "NEG_Y",
+        "NEG_Z",
+        "ONE",
+        "X",
+        "Y",
+        "Z",
+        "ZERO"
+      ],
+      "functions": [
+        "abs",
+        "as_vec3",
+        "checked_add",
+        "checked_div",
+        "checked_mul",
+        "checked_sub",
+        "clamp",
+        "cross",
+        "distance_squared",
+        "div_euclid",
+        "dot",
+        "dot_into_vec",
+        "element_product",
+        "element_sum",
+        "length_squared",
+        "max",
+        "max_element",
+        "max_position",
+        "min",
+        "min_element",
+        "min_position",
+        "new",
+        "rem_euclid",
+        "saturating_add",
+        "saturating_div",
+        "saturating_mul",
+        "saturating_sub",
+        "signum",
+        "splat",
+        "to_array",
+        "truncate",
+        "with_x",
+        "with_y",
+        "with_z",
+        "wrapping_add",
+        "wrapping_div",
+        "wrapping_mul",
+        "wrapping_sub"
+      ],
+      "name": "IVec3"
+    },
+    {
+      "constants": [
+        "IDENTITY",
+        "NAN"
+      ],
+      "functions": [
+        "abs_diff_eq",
+        "angle_between",
+        "conjugate",
+        "dot",
+        "from_axis_angle",
+        "from_euler",
+        "from_rotation_arc",
+        "from_rotation_arc_2d",
+        "from_rotation_arc_colinear",
+        "from_rotation_axes",
+        "from_rotation_x",
+        "from_rotation_y",
+        "from_rotation_z",
+        "from_scaled_axis",
+        "from_vec4",
+        "from_xyzw",
+        "inverse",
+        "is_finite",
+        "is_nan",
+        "is_near_identity",
+        "is_normalized",
+        "length",
+        "length_recip",
+        "length_squared",
+        "lerp",
+        "mul_quat",
+        "mul_vec3",
+        "new",
+        "normalize",
+        "rotate_towards",
+        "slerp",
+        "slerp_long",
+        "to_array",
+        "to_axis_angle",
+        "to_euler",
+        "to_scaled_axis",
+        "xyz"
+      ],
+      "name": "Quat"
+    },
+    {
+      "constants": [
+        "IDENTITY",
+        "NAN",
+        "ZERO"
+      ],
+      "functions": [
+        "abs_diff_eq",
+        "from_angle",
+        "from_angle_translation",
+        "from_cols",
+        "from_scale",
+        "from_scale_angle_translation",
+        "from_translation",
+        "inverse",
+        "is_finite",
+        "is_nan",
+        "new",
+        "to_cols_array",
+        "to_scale_angle_translation",
+        "transform_point2",
+        "transform_vector2"
+      ],
+      "name": "Transform2d"
+    },
+    {
+      "constants": [
+        "IDENTITY",
+        "NAN",
+        "ZERO"
+      ],
+      "functions": [
+        "abs_diff_eq",
+        "from_axis_angle",
+        "from_cols",
+        "from_quat",
+        "from_rotation_translation",
+        "from_rotation_x",
+        "from_rotation_y",
+        "from_rotation_z",
+        "from_scale",
+        "from_scale_rotation_translation",
+        "from_translation",
+        "inverse",
+        "is_finite",
+        "is_nan",
+        "new",
+        "to_scale_rotation_translation",
+        "transform_point3",
+        "transform_vector3"
+      ],
+      "name": "Transform3d"
+    },
+    {
+      "constants": [
+        "INFINITY",
+        "MAX",
+        "MIN",
+        "NAN",
+        "NEG_INFINITY",
+        "NEG_ONE",
+        "NEG_X",
+        "NEG_Y",
+        "ONE",
+        "X",
+        "Y",
+        "ZERO"
+      ],
+      "functions": [
+        "abs",
+        "abs_diff_eq",
+        "angle_to",
+        "as_ivec2",
+        "ceil",
+        "clamp",
+        "clamp_length",
+        "clamp_length_max",
+        "clamp_length_min",
+        "copysign",
+        "cos",
+        "distance",
+        "distance_squared",
+        "div_euclid",
+        "dot",
+        "dot_into_vec",
+        "element_product",
+        "element_sum",
+        "exp",
+        "exp2",
+        "extend",
+        "floor",
+        "fract",
+        "fract_gl",
+        "from_angle",
+        "is_finite",
+        "is_nan",
+        "is_normalized",
+        "length",
+        "length_recip",
+        "length_squared",
+        "lerp",
+        "ln",
+        "log2",
+        "max",
+        "max_element",
+        "max_position",
+        "midpoint",
+        "min",
+        "min_element",
+        "min_position",
+        "move_towards",
+        "mul_add",
+        "new",
+        "normalize",
+        "normalize_and_length",
+        "normalize_or",
+        "normalize_or_zero",
+        "perp",
+        "perp_dot",
+        "powf",
+        "project_onto",
+        "project_onto_normalized",
+        "recip",
+        "reflect",
+        "refract",
+        "reject_from",
+        "reject_from_normalized",
+        "rem_euclid",
+        "rotate",
+        "rotate_angle",
+        "rotate_towards",
+        "round",
+        "saturate",
+        "signum",
+        "sin",
+        "sin_cos",
+        "smoothstep",
+        "splat",
+        "sqrt",
+        "step",
+        "to_angle",
+        "to_array",
+        "trunc",
+        "try_normalize",
+        "with_x",
+        "with_y"
+      ],
+      "name": "Vec2"
+    },
+    {
+      "constants": [
+        "INFINITY",
+        "MAX",
+        "MIN",
+        "NAN",
+        "NEG_INFINITY",
+        "NEG_ONE",
+        "NEG_X",
+        "NEG_Y",
+        "NEG_Z",
+        "ONE",
+        "X",
+        "Y",
+        "Z",
+        "ZERO"
+      ],
+      "functions": [
+        "abs",
+        "abs_diff_eq",
+        "angle_between",
+        "angle_to",
+        "any_orthogonal_vector",
+        "any_orthonormal_pair",
+        "any_orthonormal_vector",
+        "as_ivec3",
+        "ceil",
+        "clamp",
+        "clamp_length",
+        "clamp_length_max",
+        "clamp_length_min",
+        "copysign",
+        "cos",
+        "cross",
+        "distance",
+        "distance_squared",
+        "div_euclid",
+        "dot",
+        "dot_into_vec",
+        "element_product",
+        "element_sum",
+        "exp",
+        "exp2",
+        "extend",
+        "floor",
+        "fract",
+        "fract_gl",
+        "from_homogeneous",
+        "is_finite",
+        "is_nan",
+        "is_normalized",
+        "length",
+        "length_recip",
+        "length_squared",
+        "lerp",
+        "ln",
+        "log2",
+        "max",
+        "max_element",
+        "max_position",
+        "midpoint",
+        "min",
+        "min_element",
+        "min_position",
+        "move_towards",
+        "mul_add",
+        "new",
+        "normalize",
+        "normalize_and_length",
+        "normalize_or",
+        "normalize_or_zero",
+        "powf",
+        "project_onto",
+        "project_onto_normalized",
+        "recip",
+        "reflect",
+        "refract",
+        "reject_from",
+        "reject_from_normalized",
+        "rem_euclid",
+        "rotate_axis",
+        "rotate_towards",
+        "rotate_x",
+        "rotate_y",
+        "rotate_z",
+        "round",
+        "saturate",
+        "signum",
+        "sin",
+        "sin_cos",
+        "slerp",
+        "smoothstep",
+        "splat",
+        "sqrt",
+        "step",
+        "to_array",
+        "to_homogeneous",
+        "trunc",
+        "truncate",
+        "try_normalize",
+        "with_x",
+        "with_y",
+        "with_z"
+      ],
+      "name": "Vec3"
+    },
+    {
+      "constants": [
+        "INFINITY",
+        "MAX",
+        "MIN",
+        "NAN",
+        "NEG_INFINITY",
+        "NEG_ONE",
+        "NEG_W",
+        "NEG_X",
+        "NEG_Y",
+        "NEG_Z",
+        "ONE",
+        "W",
+        "X",
+        "Y",
+        "Z",
+        "ZERO"
+      ],
+      "functions": [
+        "abs",
+        "abs_diff_eq",
+        "ceil",
+        "clamp",
+        "clamp_length",
+        "clamp_length_max",
+        "clamp_length_min",
+        "copysign",
+        "cos",
+        "distance",
+        "distance_squared",
+        "div_euclid",
+        "dot",
+        "dot_into_vec",
+        "element_product",
+        "element_sum",
+        "exp",
+        "exp2",
+        "floor",
+        "fract",
+        "fract_gl",
+        "is_finite",
+        "is_nan",
+        "is_normalized",
+        "length",
+        "length_recip",
+        "length_squared",
+        "lerp",
+        "ln",
+        "log2",
+        "max",
+        "max_element",
+        "max_position",
+        "midpoint",
+        "min",
+        "min_element",
+        "min_position",
+        "move_towards",
+        "mul_add",
+        "new",
+        "normalize",
+        "normalize_and_length",
+        "normalize_or",
+        "normalize_or_zero",
+        "powf",
+        "project",
+        "project_onto",
+        "project_onto_normalized",
+        "recip",
+        "reflect",
+        "refract",
+        "reject_from",
+        "reject_from_normalized",
+        "rem_euclid",
+        "round",
+        "saturate",
+        "signum",
+        "sin",
+        "sin_cos",
+        "smoothstep",
+        "splat",
+        "sqrt",
+        "step",
+        "to_array",
+        "trunc",
+        "truncate",
+        "try_normalize",
+        "with_w",
+        "with_x",
+        "with_y",
+        "with_z"
+      ],
+      "name": "Vec4"
     }
   ]
 }

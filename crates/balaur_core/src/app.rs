@@ -206,7 +206,6 @@ pub struct App {
 fn insert_core_resources(eng: &Engine, config: &AppConfig) {
     eng.insert_resource(SceneKeyRegistry::default());
     eng.insert_resource(crate::components::ComponentRegistry::default());
-    eng.insert_resource(crate::components::Attached::default());
     eng.insert_resource(crate::components::Authored::default());
     eng.insert_resource(crate::plugins::PluginRegistry::default());
     eng.insert_resource(crate::presets::PresetRegistry::default());
@@ -645,11 +644,14 @@ impl App {
                 .resource::<crate::components::ComponentRegistry>();
             let mut registry = registry.borrow_mut();
             assert!(
-                registry.0.len() < crate::components::MAX_COMPONENTS,
+                registry.len() < crate::components::MAX_COMPONENTS,
                 "registering '{name}': a build may have at most {} components",
                 crate::components::MAX_COMPONENTS
             );
-            registry.0.push((name.to_string(), def));
+            registry.insert(name, def);
+            let index = registry.len() - 1;
+            drop(registry);
+            crate::components::resolve_property_hooks(&self.engine, name, index);
         }
         let component = name.to_string();
         self.scene_key_handler(name, move |eng, entity, value| {

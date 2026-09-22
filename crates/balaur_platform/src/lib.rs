@@ -460,7 +460,7 @@ fn event_value(event: PlatformEvent) -> Value {
         PlatformEvent::Read { key, value, .. } => {
             pairs.push(("kind".into(), Value::Str("read".into())));
             pairs.push(("key".into(), Value::Str(key)));
-            pairs.push(("value".into(), value.map_or(Value::Nil, Value::Str)));
+            pairs.push(("value".into(), value.map_or(Value::Nil, Value::text)));
         }
         PlatformEvent::Failed { message, .. } => {
             pairs.push(("kind".into(), Value::Str("failed".into())));

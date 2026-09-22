@@ -65,7 +65,7 @@ pub(crate) fn host(state: &mut MultiplayerState, eng: &Engine, options: Options)
         (String::from("url"), Value::Str(listener.url.clone())),
         (
             String::from("cert_hash"),
-            listener.cert_hash.clone().map_or(Value::Nil, Value::Str),
+            listener.cert_hash.clone().map_or(Value::Nil, Value::text),
         ),
         (
             String::from("transport"),

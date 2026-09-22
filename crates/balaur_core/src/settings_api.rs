@@ -114,14 +114,14 @@ fn install_override_api(m: &mut dyn Bindings<Engine>) {
         let tags = eng.resource::<crate::tags::Tags>();
         let tags = tags.borrow();
         Ok(Value::List(
-            tags.0.iter().cloned().map(Value::Str).collect(),
+            tags.0.iter().cloned().map(Value::text).collect(),
         ))
     });
     m.function("known_tags", |eng: &Engine, (): ()| {
         Ok(Value::List(
             settings::known_tags(eng)
                 .into_iter()
-                .map(Value::Str)
+                .map(Value::text)
                 .collect(),
         ))
     });
@@ -129,7 +129,7 @@ fn install_override_api(m: &mut dyn Bindings<Engine>) {
         Ok(Value::List(
             settings::overrides(eng, &path)
                 .into_iter()
-                .map(Value::Str)
+                .map(Value::text)
                 .collect(),
         ))
     });

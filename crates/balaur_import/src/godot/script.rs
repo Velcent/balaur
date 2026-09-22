@@ -151,11 +151,11 @@ pub(crate) fn convert(source: &str, path: &str, classes: &Classes) -> Converted 
         &functions,
         &context,
         &mut notes,
-        defaults,
+        defaults.scened,
         static_init,
     );
     write_accessors(&mut out, &context, &functions);
-    write_constructor(&mut out, source, path, classes, &functions, defaults);
+    write_constructor(&mut out, source, path, classes, &functions, &defaults);
     if source.contains("_input(") || source.contains("_unhandled_input(") {
         notes
             .push("an `_input` handler: read the `input` module from `update` instead".to_string());
@@ -312,6 +312,7 @@ fn context(
             .iter()
             .map(|(name, file)| (name.clone(), file.replace(".gd", ".rn")))
             .collect(),
+        class_methods: classes.methods.clone(),
         class_statics: classes
             .statics
             .iter()
@@ -353,6 +354,11 @@ fn context(
     context
         .signals
         .extend(gdscript::BUILTIN_SIGNALS.iter().map(|s| (*s).to_string()));
+    // A handler is connected to a signal another class declares, so the
+    // project's own arities stand behind this file's.
+    for (signal, takes) in &classes.signal_arity {
+        context.signal_arity.insert(signal.clone(), *takes);
+    }
     collect_bools(&mut context, functions);
     for text in chain(source, classes) {
         bool_members(&mut context, &text);
@@ -364,6 +370,7 @@ fn context(
             context.static_vars.entry(name).or_insert(default);
         }
         context.signals.extend(level.signals);
+        context.signal_arity.extend(level.signal_arity);
         context.methods.extend(level.methods);
         context.statics.extend(level.statics);
         // `const Flows = preload("res://flows.gd")` names a class as surely
@@ -567,6 +574,9 @@ struct Declarations {
     consts: BTreeSet<String>,
     lazy: BTreeSet<String>,
     signals: BTreeSet<String>,
+    /// How many values each signal carries, so a handler bound to one takes
+    /// as many as it is called with.
+    signal_arity: BTreeMap<String, usize>,
     methods: BTreeSet<String>,
     statics: BTreeSet<String>,
 }
@@ -630,6 +640,25 @@ pub(crate) fn inner_classes(source: &str) -> Vec<(String, String)> {
 }
 
 /// A file's functions with defaulted parameters, and how many each takes.
+/// Every signal a file declares, with how many values it carries.
+pub(crate) fn signal_arities(source: &str) -> BTreeMap<String, usize> {
+    declarations(source).signal_arity
+}
+
+/// Every function a file declares, under the Rune name it is emitted with.
+pub(crate) fn function_names(source: &str) -> std::collections::BTreeSet<String> {
+    split_functions(source)
+        .into_iter()
+        .map(|f| {
+            if f.name == "_init" {
+                "new".to_string()
+            } else {
+                f.name
+            }
+        })
+        .collect()
+}
+
 pub(crate) fn defaulted(source: &str) -> BTreeMap<String, usize> {
     split_functions(source)
         .into_iter()
@@ -694,7 +723,15 @@ fn declarations(source: &str) -> Declarations {
                 out.lazy.insert(name);
             }
         } else if let Some(rest) = body.strip_prefix("signal ") {
-            out.signals.insert(name_of(rest));
+            let name = name_of(rest);
+            let takes = rest
+                .split_once('(')
+                .and_then(|(_, args)| args.split_once(')'))
+                .map_or(0, |(args, _)| {
+                    args.split(',').filter(|a| !a.trim().is_empty()).count()
+                });
+            out.signal_arity.insert(name.clone(), takes);
+            out.signals.insert(name);
         } else if let Some(rest) = body.strip_prefix("static func ") {
             out.statics.insert(name_of(rest));
         } else if let Some(rest) = body.strip_prefix("func ") {
@@ -766,16 +803,16 @@ fn write_functions(
     functions: &[Function],
     context: &Context,
     notes: &mut Vec<String>,
-    defaults: bool,
+    scened: bool,
     static_init: bool,
 ) {
     let mut seen: Vec<String> = Vec::new();
-    let mut forwarders: std::collections::BTreeMap<String, String> =
+    let mut forwarders: std::collections::BTreeMap<String, (String, bool)> =
         std::collections::BTreeMap::new();
     if static_init {
         out.push_str(&static_init_guard(&context.static_prefix));
     }
-    if write_default_init(out, functions, defaults) {
+    if write_default_init(out, functions, scened) {
         seen.push("init".to_string());
     }
     for function in functions {
@@ -851,7 +888,7 @@ fn write_functions(
             &name,
             context,
             functions,
-            defaults,
+            scened,
             static_init,
         );
         out.push_str(&body.rune);
@@ -864,14 +901,14 @@ fn write_functions(
 }
 
 /// What a function does before its own body: an int parameter truncated,
-/// the class's static setup, and `init`'s defaults, `_init` and hook guard.
+/// the class's static setup, and `init`'s `_init` call and hook guard.
 fn write_prologue(
     out: &mut String,
     function: &Function,
     name: &str,
     context: &Context,
     functions: &[Function],
-    defaults: bool,
+    scened: bool,
     static_init: bool,
 ) {
     for int in &function.ints {
@@ -884,8 +921,8 @@ fn write_prologue(
     if static_init && function.name != "_static_init" {
         let _ = writeln!(out, "    {STATIC_INIT}();");
     }
-    if defaults && name == "init" {
-        out.push_str("    defaults(this);\n");
+    if scened && name == "init" {
+        out.push_str("    scene_defaults(this);\n");
     }
     if name == "init" && constructs(functions) {
         out.push_str(init_call(functions));
@@ -908,9 +945,9 @@ fn write_forwarders(
     out: &mut String,
     functions: &[Function],
     context: &Context,
-    forwarders: &std::collections::BTreeMap<String, String>,
+    forwarders: &std::collections::BTreeMap<String, (String, bool)>,
 ) {
-    for (signal, handler) in forwarders {
+    for (signal, (handler, hid)) in forwarders {
         if functions.iter().any(|f| f.name == format!("on_{signal}")) {
             continue;
         }
@@ -924,9 +961,16 @@ fn write_forwarders(
                 all
             }),
         };
+        // Godot's `hidden` rides the visibility event: the handler runs on
+        // the pass that took the node away.
+        let guard = if *hid {
+            "    if payload {\n        return;\n    }\n"
+        } else {
+            ""
+        };
         let _ = write!(
             out,
-            "\n/// `{signal}`, as the engine delivers it.\npub fn on_{signal}(this, payload) {{\n    {handler}(this{args});\n}}\n"
+            "\n/// `{signal}`, as the engine delivers it.\npub fn on_{signal}(this, payload) {{\n{guard}    {handler}(this{args});\n}}\n"
         );
     }
 }

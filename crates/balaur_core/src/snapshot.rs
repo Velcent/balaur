@@ -251,7 +251,7 @@ fn resolved(index: &crate::DetHashMap<String, Entity>, value: Value) -> Value {
             if let [(key, Value::Str(id))] = pairs.as_slice()
                 && key == NODE_REF
             {
-                return index.get(id).map_or(Value::Nil, |entity| {
+                return index.get(id.as_str()).map_or(Value::Nil, |entity| {
                     Value::Node(crate::node_id_of(*entity).0)
                 });
             }

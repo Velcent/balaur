@@ -113,6 +113,30 @@ In this repository:
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Balaur is [MIT licensed](LICENSE).
 
+## AI Usage
+
+This project uses AI to aid in software development, and accepts AI contributions. What keeps the code sound is what the industry already does: manual testing, automated testing, an architecture written down, spec docs, linting and benchmarking. [The quality page](https://balaurengine.org/docs/quality/) says what each one covers.
+
+Every bit of code is tested against this pipeline / process.
+
+There is also a lot of observability and documentation which we use, as the codebase is large and it will keep growing, so having a high level understanding of it is very important, as well as a low level one. For that we have both references from code for nodes/properties, but also documentation and blogposts per features:
+
+- https://balaurengine.org/docs/intro/
+
+- https://balaurengine.org/docs/benchmarks/
+
+- https://balaurengine.org/docs/architecture/
+
+- https://balaurengine.org/docs/built-on/
+
+- https://balaurengine.org/blog/
+
+- https://balaurengine.org/docs/reference/
+
+If you are interested to see the roadmap of what we plan to build next, and where we are now, be sure to also check:
+
+- https://balaurengine.org/docs/roadmap/
+
 ## Star History
 
 <a href="https://www.star-history.com/?repos=balaurengine%2Fbalaur&type=timeline&legend=bottom-right">

@@ -130,7 +130,7 @@ impl MultiplayerState {
 
     /// Queue an event for every script's `on_multiplayer_event`.
     pub(crate) fn tell(&mut self, kind: EventKind, fields: Vec<(&str, Value)>) {
-        let mut map = vec![(String::from("kind"), Value::Str(kind.name().into()))];
+        let mut map = vec![("kind".to_string(), Value::Str(kind.name().into()))];
         map.extend(
             fields
                 .into_iter()

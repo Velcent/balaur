@@ -15,6 +15,8 @@ use balaur_script::Bindings;
 
 #[cfg(feature = "aseprite")]
 pub mod aseprite;
+mod batch_2d;
+mod batch_3d;
 mod boolean;
 mod camera;
 mod cloner;
@@ -68,6 +70,7 @@ mod tile_quad;
 mod tilemap;
 #[cfg(feature = "kiss3d")]
 mod tilemap_mesh;
+mod vocabulary;
 pub mod world_text;
 pub use camera::{Camera2d, Camera3d, Finish, Occlusion, Post, PostPass};
 pub use cloner::Clones;
@@ -838,7 +841,7 @@ impl balaur_plugin::Plugin for RenderPlugin {
         m.module_doc(
             "What a frame is made of: the shape, sprite, mesh or emitter a node draws, the 2D and 3D cameras, the backdrop, debug lines and screenshots. `window` holds the window itself.",
         );
-        for (name, value) in shape::CONSTANTS {
+        for (name, value) in vocabulary::CONSTANTS {
             m.constant(name, balaur_script::Value::Str((*value).to_string()));
         }
         script_api::install_camera_api(&mut *m);
@@ -894,8 +897,6 @@ impl balaur_plugin::Plugin for RenderPlugin {
         reg.add_system(Stage::SceneSync, boolean::resolve_booleans_system);
         // After the booleans: a cloner may multiply their result too.
         reg.add_system(Stage::SceneSync, cloner::resolve_cloners_system);
-        // After the cloners, so a node's copies are counted with it.
-        reg.add_system(Stage::Render, stats::measure_system);
         reg.add_system(Stage::Render, clear_debug_lines_system);
 
         Ok(())

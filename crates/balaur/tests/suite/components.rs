@@ -111,9 +111,9 @@ fn every_component_emits_only_keys_its_schema_declares() {
         .engine
         .resource::<balaur::components::ComponentRegistry>();
     let registry = registry.borrow();
-    assert!(registry.0.len() > 4, "the standard plugins registered none");
+    assert!(registry.len() > 4, "the standard plugins registered none");
 
-    for (name, def) in &registry.0 {
+    for (name, def) in &*registry {
         let entity = spawn(&app, name);
         // `color` writes into a renderable rather than owning storage, so
         // seed both; every other component applies on a bare node.
@@ -185,7 +185,7 @@ fn every_component_round_trips_through_get_and_apply() {
         .resource::<balaur::components::ComponentRegistry>();
     let registry = registry.borrow();
 
-    for (name, def) in &registry.0 {
+    for (name, def) in &*registry {
         let entity = spawn(&app, name);
         // `color` writes into a renderable rather than owning storage, so
         // seed both; every other component applies on a bare node.
@@ -217,7 +217,7 @@ fn every_enum_option_a_schema_offers_round_trips() {
     let registry = registry.borrow();
     let mut checked = 0;
 
-    for (name, def) in &registry.0 {
+    for (name, def) in &*registry {
         let schema = def.schema.as_table().unwrap();
         let exempt: &[&str] = CONDITIONAL
             .iter()
@@ -355,7 +355,7 @@ fn every_component_emits_every_key_its_schema_declares() {
         .resource::<balaur::components::ComponentRegistry>();
     let registry = registry.borrow();
 
-    for (name, def) in &registry.0 {
+    for (name, def) in &*registry {
         let entity = spawn(&app, name);
         // `color` writes into a renderable rather than owning storage, so
         // seed both; every other component applies on a bare node.
@@ -391,4 +391,72 @@ fn every_component_emits_every_key_its_schema_declares() {
             );
         }
     }
+}
+
+/// Writing one property leaves the component's others where they were.
+///
+/// `transform` takes a single property without reading its table back, so
+/// this covers the fast path and that what it wrote is what a read answers.
+#[test]
+fn a_one_property_write_leaves_the_rest() {
+    let (dir, app) = app_with_every_component();
+    run_script(
+        dir.path(),
+        &app,
+        r#"
+        pub fn init(this) {
+            let n = scene::root().add_child("Moved");
+            n.set_component("transform", #{ position: [1.0, 2.0, 3.0], scale: [4.0, 4.0, 4.0] });
+            n.patch_component("transform", #{ position: [9.0, 0.0, 0.0] });
+
+            let at = n.get_component("transform", "position");
+            assert!(at[0] == 9.0, "position moved");
+            let size = n.get_component("transform", "scale");
+            assert!(size[0] == 4.0, "scale survived the write");
+            assert!(n.transform.position.x == 9.0, "the handle reads it back");
+
+            // A node with no transform of its own reads the declared default.
+            let bare = scene::root().add_child("Bare");
+            bare.remove_component("transform");
+            assert!(bare.transform.scale.x == 1.0, "the default scale");
+
+            this.done = 1.0;
+        }
+        "#,
+    );
+}
+
+/// A keyed read answers the one property, and the same value the table holds.
+///
+/// Two components: `widget` reads its properties one at a time without
+/// building the table, and `collider3d` has no such fast path, so this also
+/// covers the fallback that reads the table and indexes it.
+#[test]
+fn a_keyed_read_answers_one_property() {
+    let (dir, app) = app_with_every_component();
+    run_script(
+        dir.path(),
+        &app,
+        r#"
+        pub fn init(this) {
+            let n = scene::root().add_child("Keyed");
+            n.set_component("widget", #{ text: "hi", kind: "button" });
+            n.set_component("collider3d", #{ kind: "ball", radius: 0.7 });
+
+            assert!(n.get_component("widget", "text") == "hi", "widget text");
+            assert!(n.get_component("widget", "kind") == "button", "widget kind");
+            assert!(n.get_component("widget", "clicked") == false, "widget clicked");
+            let table = n.get_component("widget");
+            assert!(n.get_component("widget", "value") == table.value, "same as the table");
+
+            // No fast path: the table is read and indexed.
+            assert!(n.get_component("collider3d", "kind") == "ball", "collider kind");
+
+            assert!(n.get_component("widget", "no_such_property") == (), "unknown property");
+            assert!(n.get_component("body3d", "kind") == (), "component the node lacks");
+
+            this.done = 1.0;
+        }
+        "#,
+    );
 }

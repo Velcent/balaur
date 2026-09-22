@@ -75,7 +75,7 @@ pub(crate) fn install_theme(m: &mut dyn Bindings<Engine>) {
 /// the `hover` and `active` tables inside a role name colours the same way.
 fn spelled(value: &Value, hex: &std::collections::HashMap<String, String>) -> Value {
     match value {
-        Value::Str(text) => match hex.get(text) {
+        Value::Str(text) => match hex.get(text.as_str()) {
             Some(found) => Value::Str(found.clone()),
             None => value.clone(),
         },
@@ -500,12 +500,6 @@ pub(crate) fn install_widget_layer(m: &mut dyn Bindings<Engine>) {
         "The same for one named surface: roots whose `layer` is this name draw here instead. A name nothing has set takes the default surface.",
     ),
     (
-        "widget_rect",
-        &[],
-        "",
-        "Where a `widget` node was last drawn, as `#{ x, y, w, h }` in design pixels; empty until it has drawn once.",
-    ),
-    (
         "set_keyboard_focus",
         &[],
         "",
@@ -561,25 +555,8 @@ pub(crate) fn install_widget_layer(m: &mut dyn Bindings<Engine>) {
                 Ok(())
             },
         );
-        m.function(
-            "widget_rect",
-            |_eng: &Engine, node: balaur_script::NodeId| {
-                Ok(
-                    crate::widget::arrange::drawn_at(balaur_core::entity_of(node)?).map_or(
-                        Value::Nil,
-                        |r| {
-                            Value::Map(vec![
-                                (k::X.into(), Value::Num(f64::from(r.min.x))),
-                                (k::Y.into(), Value::Num(f64::from(r.min.y))),
-                                (k::W.into(), Value::Num(f64::from(r.width()))),
-                                (k::H.into(), Value::Num(f64::from(r.height()))),
-                            ])
-                        },
-                    ),
-                )
-            },
-        );
     }
+    crate::immediate::rects::install_rects(m);
     install_focus(m);
 }
 
@@ -640,7 +617,12 @@ fn install_focus(m: &mut dyn Bindings<Engine>) {
     });
     m.function("set_focus", |eng: &Engine, node: balaur_script::NodeId| {
         let entity = balaur_core::entity_of(node)?;
-        eng.resource::<crate::UiFocus>().borrow_mut().focused = Some(entity);
+        let focus = eng.resource::<crate::UiFocus>();
+        let mut focus = focus.borrow_mut();
+        focus.focused = Some(entity);
+        // Taken, not merely resting there: the next draw puts the caret in a
+        // field and tells the node focus arrived.
+        focus.taking = true;
         Ok(())
     });
     m.function(

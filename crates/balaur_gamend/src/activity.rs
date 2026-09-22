@@ -67,7 +67,7 @@ pub(crate) struct Activity {
 fn kept(json: &Json) -> Value {
     let size = serde_json::to_string(json).map_or(0, |text| text.len());
     if size > LARGEST {
-        return Value::Str(format!("{size} bytes, not kept"));
+        return Value::text(format!("{size} bytes, not kept"));
     }
     from_json(json).unwrap_or(Value::Nil)
 }
@@ -340,11 +340,11 @@ impl Activity {
                     (String::from("open"), Value::Bool(socket.open)),
                     (
                         String::from("topics"),
-                        Value::List(socket.topics.iter().cloned().map(Value::Str).collect()),
+                        Value::List(socket.topics.iter().cloned().map(Value::text).collect()),
                     ),
                     (
                         String::from("reason"),
-                        socket.reason.clone().map_or(Value::Nil, Value::Str),
+                        socket.reason.clone().map_or(Value::Nil, Value::text),
                     ),
                 ])
             })

@@ -200,12 +200,27 @@ pub fn show_log(items) {
 
 // What the log reports as picked, cleared once the caller has acted on it.
 fn taken_log() {
-    util::taken(LOG_NODE, util::fill(LOG_NODE, #{}))
+    util::taken(LOG_NODE)
 }
 
 // Hidden while a panel that is not a list is up.
 pub fn hide_log() {
     util::hide(LOG_NODE);
+}
+
+// The bottom dock's column of pooled rows, which a panel whose rows are nodes
+// fills instead of drawing them. One host, as the log and the table are: only
+// the panel that is up may write to it.
+const ROWS_NODE = "Editor/Shell/Body/Centre/Bottom/BottomRows";
+
+/// The host a panel fills with `pool::sync`, shown by the asking.
+pub fn rows_host(S) {
+    util::fill(ROWS_NODE, #{ visible: true });
+    ROWS_NODE + "/BottomRowsColumn"
+}
+
+pub fn hide_rows() {
+    util::hide(ROWS_NODE);
 }
 
 // The bottom dock's card grid, which Assets, Library and Tiles take turns
@@ -233,8 +248,8 @@ const TABLE_NODE = "Editor/Shell/Body/Centre/Bottom/BottomTable";
 // share a column, stated only when the columns change: restating it every
 // frame would snap the reader's own drag away.
 pub fn show_table(titles, widths, items) {
-    let held = util::fill(TABLE_NODE, #{});
-    let same = util::cells(util::vec(held.get("titles").unwrap_or([]))) == util::cells(titles);
+    let held = util::prop(TABLE_NODE, "titles");
+    let same = util::cells(util::vec(if held is Vec { held } else { [] })) == util::cells(titles);
     let params = #{ titles: titles, options: items, visible: true, sortable: true };
     if !same {
         params["widths"] = widths;
@@ -251,7 +266,7 @@ pub fn hide_table() {
 
 // What the table reports as picked, cleared once the caller has acted on it.
 pub fn taken_table() {
-    util::taken(TABLE_NODE, util::fill(TABLE_NODE, #{}))
+    util::taken(TABLE_NODE)
 }
 
 pub fn output(S, k) {
@@ -343,48 +358,48 @@ fn asset_verbs(S, k) {
     let chosen = S.assets.sel != "";
     // One button, two jobs: an import to start, or the one running to stop.
     let importing = crate::dropin::in_flight(S) > 0;
-    let label = if importing { " cancel" } else { " import" };
-    if ui::pill(icons::panel("import") + label, #{
-        height: 20, size: style::SM, strong: true,
-        tooltip: if importing { "Stop the import after the file it is writing" }
-            else { "Bring in a model, a sprite or a level" },
-        fill: k.sunken, color: if importing { k.accent } else { k.dim },
-    }) {
-        if importing {
-            import::cancel();
-        } else {
-            // Asks and imports: a dialog on a desktop, the page's own chooser
-            // in a tab, and the same reports either way.
-            import::choose();
-        }
-    }
-    ui::add_space(6);
-    if ui::pill(icons::ui("add") + " folder", #{
-        height: 20, size: style::SM, strong: true, tooltip: "Make a folder here",
-        fill: k.sunken, color: k.dim,
-    }) {
-        new_folder(S);
-    }
-    ui::add_space(6);
-    if ui::pill("rename", #{
-        height: 20, size: style::SM, strong: true,
-        tooltip: if chosen { "Rename the selected item" } else { "Select an item first" },
-        fill: k.sunken, color: if chosen { k.dim } else { k.line },
-    }) {
-        if chosen {
-            S.assets.renaming = !S.assets.renaming;
-        }
-    }
-    ui::add_space(6);
-    if ui::pill("delete", #{
-        height: 20, size: style::SM, strong: true,
-        tooltip: if chosen { "Delete the selected item" } else { "Select an item first" },
-        fill: k.sunken, color: if chosen { k.accent } else { k.line },
-    }) {
-        if chosen {
-            delete_asset(S);
-        }
-    }
+    [
+        #{
+            kind: "button", text: icons::panel("import") + if importing { " cancel" } else { " import" },
+            role: if importing { "chrome_verb_on" } else { "chrome_verb" },
+            tooltip: if importing { "Stop the import after the file it is writing" }
+                else { "Bring in a model, a sprite or a level" },
+            on: |_| {
+                if importing {
+                    import::cancel();
+                } else {
+                    // Asks and imports: a dialog on a desktop, the page's own
+                    // chooser in a tab, and the same reports either way.
+                    import::choose();
+                }
+            },
+        },
+        #{
+            kind: "button", role: "chrome_verb", text: icons::ui("add") + " folder",
+            tooltip: "Make a folder here",
+            on: |_| { new_folder(S); },
+        },
+        #{
+            kind: "button", text: "rename",
+            role: if chosen { "chrome_verb" } else { "chrome_verb_off" },
+            tooltip: if chosen { "Rename the selected item" } else { "Select an item first" },
+            on: |_| {
+                if chosen {
+                    S.assets.renaming = !S.assets.renaming;
+                }
+            },
+        },
+        #{
+            kind: "button", text: "delete",
+            role: if chosen { "chrome_verb_warn" } else { "chrome_verb_off" },
+            tooltip: if chosen { "Delete the selected item" } else { "Select an item first" },
+            on: |_| {
+                if chosen {
+                    delete_asset(S);
+                }
+            },
+        },
+    ]
 }
 
 fn asset_path(S, rel) {
@@ -447,33 +462,35 @@ pub fn assets(S, k) {
             files.push(f);
         }
     }
-    ui::horizontal(#{ height: 24 }, || {
-        ui::add_space(12);
-        if dir != "" {
-            if ui::pill("↑", #{ height: 20, size: style::SM, strong: true, fill: k.sunken, color: k.dim, tooltip: "Up one folder" }) {
-                S.assets.dir = parent_dir(dir);
-            }
-            ui::add_space(6);
-        }
-        if S.assets.renaming {
-            let (name, _, submitted) = ui::text_field("asset-rename", "new name",
-                util::merge(style::field(k, 180.0), #{ value: util::last_segment(S.assets.sel) }));
-            if submitted {
-                rename_asset(S, name);
-            }
-        } else {
-            ui::label(format!("res://{}", dir), style::mono_sm(k.faint));
-        }
-        ui::right(|| {
-            ui::add_space(12);
-            ui::label(format!("{} items", files.len()), style::mono_sm(k.faint));
-            ui::add_space(12);
-            asset_verbs(S, k);
-            ui::add_space(8);
-            crate::search::field(S, k, "assets", "Search", 140.0);
-        });
-    });
+    crate::docks::chrome_rows(S, [assets_chrome(S, k, dir, files.len())]);
     show_cards(S, k, dir, files);
+}
+
+/// The Assets strip: where the browser is, what is in it, and the verbs.
+fn assets_chrome(S, k, dir, count) {
+    let out = [];
+    if dir != "" {
+        out.push(#{
+            kind: "button", role: "chrome_verb", text: "↑", tooltip: "Up one folder",
+            on: |_| { S.assets.dir = parent_dir(dir); },
+        });
+    }
+    if S.assets.renaming {
+        out.push(#{
+            kind: "field", role: "chrome_field", width: 180,
+            text: util::last_segment(S.assets.sel), placeholder: "new name",
+            on_submit: |name| { rename_asset(S, name); },
+        });
+    } else {
+        out.push(#{ kind: "label", role: "meta", text: format!("res://{}", dir) });
+    }
+    out.push(#{ kind: "row", grow: 1 });
+    out.push(#{ kind: "label", role: "meta", text: format!("{} items", count) });
+    for verb in asset_verbs(S, k) {
+        out.push(verb);
+    }
+    out.push(crate::search::control(S, "assets", "Search", 140.0));
+    out
 }
 
 // The cards themselves, on the bottom dock's `list` node in its icon mode.
@@ -493,15 +510,15 @@ fn show_cards(S, k, dir, files) {
             chosen = items[n];
         }
     }
-    let params = util::fill(CARDS_NODE, #{
+    util::fill(CARDS_NODE, #{
         options: items, visible: true, columns: 6, text: chosen,
     });
     // `clicked` rather than a changed `text`: a second click on the selected
     // card reports the same string, and that is the one that opens it.
-    if !params["clicked"] {
+    if util::prop(CARDS_NODE, "clicked") != true {
         return;
     }
-    let picked = params["text"];
+    let picked = util::prop(CARDS_NODE, "text");
     for (n, item) in items.iter().enumerate() {
         if item != picked {
             continue;
@@ -768,8 +785,8 @@ fn show_frames(S, k, p) {
             chosen = items[n];
         }
     }
-    let params = util::fill(TREE_NODE, #{ options: items, visible: true, text: chosen });
-    let picked = params["text"];
+    util::fill(TREE_NODE, #{ options: items, visible: true, text: chosen });
+    let picked = util::prop(TREE_NODE, "text");
     for (n, item) in items.iter().enumerate() {
         if item == picked {
             S.debug.frame = owners[n];
@@ -833,10 +850,6 @@ fn open_at(S, f) {
 // clicking the ruler seeks — backwards by rebuilding and running to it again.
 pub fn session_view(S, k) {
     ui::add_space(4);
-    if !session::loaded(S) {
-        session_list(S, k);
-        return;
-    }
     let split = replay::diverged();
     let first = S.session.first;
     let last = S.session.last;
@@ -959,76 +972,80 @@ fn detail(S, k) {
 // Every recording this game has made, newest first. "Keep" renames one out of
 // the ring that prunes the oldest, so a session worth returning to survives
 // the next ten runs.
-fn session_list(S, k) {
-    ui::horizontal(#{ height: 24 }, || {
-        ui::add_space(8);
-        ui::label("sessions are recorded on every play", style::mono_sm(k.faint));
-        ui::right(|| {
-            ui::add_space(8);
-            let on = S.session.verify;
-            if ui::pill("verify", #{
-                height: 20, size: style::SM, strong: true,
-                tooltip: "Hash the world every tick, so a replay can name where it parted",
-                fill: if on { k.accent_fill } else { k.sunken },
-                color: if on { k.on_accent } else { k.faint },
-            }) {
-                S.session.verify = !on;
-            }
-        });
-    });
-    let rows = session::listing(S);
-    if rows.len() == 0 {
-        style::empty(k, "no sessions yet — press Play");
+///
+/// The list is the Session panel until a recording is open, when the lanes
+/// take the node instead.
+pub fn session_list(S, k) {
+    if session::loaded(S) {
+        hide_rows();
         return;
     }
-    ui::scroll("session-list", (), || {
-        ui::spacing(4, 2);
-        for r in rows {
-            ui::horizontal(#{ height: 24 }, || {
-                ui::add_space(8);
-                if ui::pill("▶", #{
-                    height: 20, size: style::SM, strong: true, tooltip: "Replay this session",
-                    fill: k.accent_soft, color: k.accent,
-                }) {
-                    session::open(S, r.name);
-                }
-                let when = if r.started == "" { r.name } else { r.started };
-                ui::label(when, style::mono_sm(k.text));
-                ui::label(format!("{} ticks · {:.1}s", r.ticks, r.seconds),
-                    style::mono_sm(k.faint));
-                // How it ended, and whether its code has moved on since.
-                if r.reason != "stop" {
-                    ui::label(r.reason, style::mono_sm(k.accent));
-                }
-                if r.stale {
-                    ui::label("scripts changed", style::mono_sm(k.accent));
-                }
-                ui::right(|| {
-                    ui::add_space(8);
-                    if ui::pill("delete", #{
-                        height: 20, size: style::SM, strong: true,
-                        fill: k.sunken, color: k.faint,
-                    }) {
-                        session::remove(S, r.name);
-                    }
-                    if ui::pill("export", #{
-                        height: 20, size: style::SM, strong: true,
-                        tooltip: "Copy into the project, for a bug report or `balaur replay`",
-                        fill: k.sunken, color: k.dim,
-                    }) {
-                        session::export(S, r.name);
-                    }
-                    if !r.name.starts_with("kept-") && ui::pill("keep", #{
-                        height: 20, size: style::SM, strong: true,
-                        tooltip: "Never prune this one",
-                        fill: k.sunken, color: k.dim,
-                    }) {
-                        session::keep(S, r.name);
-                    }
-                });
-            });
-        }
+    let on = S.session.verify;
+    crate::docks::chrome_rows(S, [[
+        #{ kind: "label", role: "meta", grow: 1, text: "sessions are recorded on every play" },
+        #{
+            kind: "button", text: "verify",
+            role: if on { "chip_on" } else { "chip" },
+            tooltip: "Hash the world every tick, so a replay can name where it parted",
+            on: |_| { S.session.verify = !on; },
+        },
+    ]]);
+    let rows = session::listing(S);
+    let specs = [];
+    if rows.len() == 0 {
+        specs.push(#{ full: true, height: 0, controls: [#{
+            kind: "label", role: "meta", grow: 1, wrap: true,
+            text: "no sessions yet — press Play",
+        }] });
+    }
+    for entry in rows {
+        // Bound afresh: a closure made in a loop captures the binding.
+        let r = entry;
+        specs.push(#{ full: true, height: 24, slot_role: "verb_row", controls: session_row(S, r) });
+    }
+    crate::pool::sync(S, rows_host(S), specs, 0.0, false);
+}
+
+// One recording: the verb that plays it, what it is, and the three that keep,
+// copy or drop it.
+fn session_row(S, r) {
+    let out = [
+        #{
+            kind: "button", role: "row_action_warn", text: "▶",
+            tooltip: "Replay this session",
+            on: |_| { session::open(S, r.name); },
+        },
+        #{ kind: "label", role: "mono", text: if r.started == "" { r.name } else { r.started } },
+        #{
+            kind: "label", role: "meta",
+            text: format!("{} ticks · {:.1}s", r.ticks, r.seconds),
+        },
+    ];
+    // How it ended, and whether its code has moved on since.
+    if r.reason != "stop" {
+        out.push(#{ kind: "label", role: "error_note", text: r.reason });
+    }
+    if r.stale {
+        out.push(#{ kind: "label", role: "error_note", text: "scripts changed" });
+    }
+    out.push(#{ kind: "row", grow: 1 });
+    out.push(#{
+        kind: "button", role: "row_action", text: "delete",
+        on: |_| { session::remove(S, r.name); },
     });
+    out.push(#{
+        kind: "button", role: "row_action", text: "export",
+        tooltip: "Copy into the project, for a bug report or `balaur replay`",
+        on: |_| { session::export(S, r.name); },
+    });
+    if !r.name.starts_with("kept-") {
+        out.push(#{
+            kind: "button", role: "row_action", text: "keep",
+            tooltip: "Never prune this one",
+            on: |_| { session::keep(S, r.name); },
+        });
+    }
+    out
 }
 
 // What one 60 Hz frame costs, as a bar per stage against that budget. The

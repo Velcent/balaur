@@ -10,6 +10,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use rune::alloc::clone::TryClone as _;
+use rune::runtime::ToConstValue as _;
 use rune::runtime::{VmError, VmResult};
 
 use crate::inspect::public_functions;
@@ -43,22 +44,56 @@ pub(crate) struct Mounted {
     pub(crate) doc: String,
 }
 
-/// A value a native module can hold as a constant.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) enum Constant {
-    Bool(bool),
-    Int(i64),
-    Num(f64),
-    Str(String),
+/// A value a native module can hold as a constant: a bool, a number, a
+/// string, or a list or table of them.
+#[derive(Debug)]
+pub(crate) struct Constant {
+    value: rune::runtime::ConstValue,
+    /// What the editor shows beside the name, and what the fingerprint folds.
+    text: String,
+}
+
+impl Clone for Constant {
+    fn clone(&self) -> Self {
+        Self {
+            value: self.value.try_clone().expect("a constant is small"),
+            text: self.text.clone(),
+        }
+    }
+}
+
+impl PartialEq for Constant {
+    fn eq(&self, other: &Self) -> bool {
+        self.text == other.text
+    }
 }
 
 impl std::fmt::Display for Constant {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Bool(b) => write!(f, "{b}"),
-            Self::Int(i) => write!(f, "{i}"),
-            Self::Num(n) => write!(f, "{n}"),
-            Self::Str(s) => write!(f, "{s:?}"),
+        f.write_str(&self.text)
+    }
+}
+
+/// Fold what the mounts expose into `hasher`: every name a script may call
+/// and every constant folded into it at compile time.
+///
+/// A cached unit compiled against other addons would name items that are no
+/// longer there, so this is half of what `cache::stamp` covers.
+pub(crate) fn fingerprint(mounts: &[Mount], hasher: &mut balaur_core::digest::Hasher) {
+    for mount in mounts {
+        hasher.write_str(&mount.key);
+        for part in &mount.path {
+            hasher.write_str(part);
+        }
+        for function in &mount.functions {
+            hasher.write_str(&function.name);
+            hasher.write_u64(u64::try_from(function.arity).unwrap_or(u64::MAX));
+        }
+        for (path, value) in &mount.constants {
+            for part in path {
+                hasher.write_str(part);
+            }
+            hasher.write_str(&value.to_string());
         }
     }
 }
@@ -385,7 +420,7 @@ fn constants(key: &str, source: &str) -> Vec<(Vec<String>, Constant)> {
                 let constant = constant_of(&value);
                 if constant.is_none() {
                     tracing::error!(
-                        "{key}: `{}` is not a bool, number or string, so it is not mounted",
+                        "{key}: `{}` is not a value a constant can hold, so it is not mounted",
                         path.join("::")
                     );
                 }
@@ -470,18 +505,40 @@ fn evaluate(snippet: &str) -> anyhow::Result<Vec<rune::Value>> {
 }
 
 fn constant_of(value: &rune::Value) -> Option<Constant> {
+    // Rendering takes the value apart, so the constant is built first.
+    let held = value.try_clone().ok()?.to_const_value().ok()?;
+    Some(Constant {
+        value: held,
+        text: render(value)?,
+    })
+}
+
+/// A constant as the editor shows it, and as the fingerprint folds it. A
+/// value with no rendering here is one a constant cannot hold.
+fn render(value: &rune::Value) -> Option<String> {
     let owned = || value.try_clone().ok();
     if let Some(Ok(b)) = owned().map(rune::from_value::<bool>) {
-        return Some(Constant::Bool(b));
+        return Some(b.to_string());
     }
     if let Some(Ok(i)) = owned().map(rune::from_value::<i64>) {
-        return Some(Constant::Int(i));
+        return Some(i.to_string());
     }
     if let Some(Ok(n)) = owned().map(rune::from_value::<f64>) {
-        return Some(Constant::Num(n));
+        return Some(n.to_string());
     }
     if let Some(Ok(s)) = owned().map(rune::from_value::<String>) {
-        return Some(Constant::Str(s));
+        return Some(format!("{s:?}"));
+    }
+    if let Some(Ok(list)) = owned().map(rune::from_value::<Vec<rune::Value>>) {
+        let parts = list.iter().map(render).collect::<Option<Vec<_>>>()?;
+        return Some(format!("[{}]", parts.join(", ")));
+    }
+    if let Some(Ok(table)) = owned().map(rune::from_value::<rune::runtime::Object>) {
+        let mut parts = Vec::new();
+        for (key, held) in &table {
+            parts.push(format!("{key:?}: {}", render(held)?));
+        }
+        return Some(format!("#{{{}}}", parts.join(", ")));
     }
     None
 }
@@ -524,16 +581,14 @@ fn module_of(mount: &Mount, slot: usize) -> anyhow::Result<Vec<rune::Module>> {
 }
 
 fn add_constant(module: &mut rune::Module, name: &str, value: &Constant) -> anyhow::Result<()> {
-    match value {
-        Constant::Bool(b) => module.constant(name, *b).build()?,
-        Constant::Int(i) => module.constant(name, *i).build()?,
-        Constant::Num(n) => module.constant(name, *n).build()?,
-        Constant::Str(s) => module.constant(name, s.as_str()).build()?,
-    };
+    module.constant_value(name, value.value.try_clone()?)?;
     Ok(())
 }
 
 /// A native function that runs `name` from `key`'s current unit.
+///
+/// Raw, so a mounted function takes as many arguments as it declares: Rune's
+/// typed registration stops at five.
 fn forward(
     module: &mut rune::Module,
     slot: usize,
@@ -541,40 +596,27 @@ fn forward(
     name: &str,
     arity: usize,
 ) -> anyhow::Result<()> {
-    type V = rune::Value;
     let call = Call {
         slot,
         key: key.to_string(),
         name: name.to_string(),
     };
-    match arity {
-        0 => module
-            .function(name, move || call.run(Vec::new()))
-            .build()?,
-        1 => module
-            .function(name, move |a: V| call.run(vec![a]))
-            .build()?,
-        2 => module
-            .function(name, move |a: V, b: V| call.run(vec![a, b]))
-            .build()?,
-        3 => module
-            .function(name, move |a: V, b: V, c: V| call.run(vec![a, b, c]))
-            .build()?,
-        4 => module
-            .function(name, move |a: V, b: V, c: V, d: V| {
-                call.run(vec![a, b, c, d])
-            })
-            .build()?,
-        5 => module
-            .function(name, move |a: V, b: V, c: V, d: V, e: V| {
-                call.run(vec![a, b, c, d, e])
-            })
-            .build()?,
-        _ => anyhow::bail!(
-            "`{name}` takes {arity} arguments; a mounted function takes at most {}",
-            crate::shared::MOST_ARGS
-        ),
+    let handler = move |stack: &mut dyn rune::runtime::Memory,
+                        addr: rune::runtime::InstAddress,
+                        args: usize,
+                        out: rune::runtime::Output| {
+        if args != arity {
+            return VmResult::Err(VmError::panic(format!(
+                "{}: {} takes {arity} arguments, called with {args}",
+                call.key, call.name
+            )));
+        }
+        let taken = rune::vm_try!(stack.slice_at(addr, args)).to_vec();
+        let value = rune::vm_try!(call.run(taken));
+        rune::vm_try!(out.store(stack, value));
+        VmResult::Ok(())
     };
+    module.raw_function(name, handler).build()?;
     Ok(())
 }
 

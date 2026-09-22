@@ -41,7 +41,7 @@ fn table(pairs: &[(&str, Value)]) -> Value {
     Value::Map(
         pairs
             .iter()
-            .map(|(k, v)| ((*k).to_string(), v.clone()))
+            .map(|(k, v)| (k.to_string(), v.clone()))
             .collect(),
     )
 }

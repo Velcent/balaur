@@ -60,6 +60,16 @@ These land in the same commit as the code:
 - **A devlog post** in the website repo's `blog/` when a user can see the
   change. One post per feature, with a picture or a clip.
 
+## Vocabulary
+
+A crate's words and keys live in one `src/vocabulary.rs`: `keys` for the
+property names a schema and its reader spell, `words` for the closed sets a
+`kind` or a mode takes, and the script constants beside them. A call site
+names a constant — `prop_f32(params, k::RADIUS)`, never `"radius"` — so a
+schema line and the reader behind it cannot drift apart.
+`scripts/house_lints.py` enforces it (`vocabulary-literal`) in every crate
+that keeps one; `docs/NAMING.md` N17 says which crates do not yet.
+
 ## Comments
 
 Prefer a name; a comment is a second thing to keep true. Write one only for:
@@ -92,8 +102,8 @@ safe. Compute into a local first:
     S.viewport_live = live;
 
 `return || f` is **`(return) || f`**: it returns nothing, and `return |x| ..`,
-`return match ..` and a template string after `return` do not compile. Bind
-the value first.
+`return match ..`, `return [..]`, `return crate::m::f()` and a template string
+after `return` do not compile. Bind the value first.
 
 A `}` followed by `(` or `[` **continues the expression**: the block's value is
 called or indexed, and the error names a type from the line above. Bind first:

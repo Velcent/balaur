@@ -464,7 +464,7 @@ impl ScriptRef {
     fn props(&self) -> Result<Vec<(String, Value)>> {
         self.props
             .iter()
-            .map(|(k, v)| Ok((k.clone(), crate::node_api::from_toml(v)?)))
+            .map(|(k, v)| Ok((k.as_str().into(), crate::node_api::from_toml(v)?)))
             .collect()
     }
 }

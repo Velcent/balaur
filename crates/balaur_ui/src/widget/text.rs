@@ -4,7 +4,7 @@
 use egui::vec2;
 
 use crate::vocabulary::words as w;
-use crate::widget::arrange::box_of;
+use crate::widget::arrange::solved_of;
 use crate::widget::layer::{Edit, Painting};
 use crate::widget::node::Widget;
 use crate::widget::theme::weight_of;
@@ -28,7 +28,10 @@ pub(crate) fn text_request<'a>(
         weight: weight_of(style, widget).clamp(100.0, 900.0) as u16,
         italic: widget.font_style == w::ITALIC,
         width,
-        align: match widget.text_align.as_str() {
+        // A grown child was cut at its box above; `truncate` says end that
+        // cut with an ellipsis rather than mid-glyph.
+        truncate: widget.truncate,
+        align: match crate::widget::theme::text_align_of(style, widget) {
             w::CENTER => balaur_text::Align::Center,
             w::END => balaur_text::Align::End,
             _ => balaur_text::Align::Start,
@@ -79,15 +82,31 @@ pub(crate) fn shaped_label(
     let placed = &at.arena[index];
     let entity = placed.entity;
     let widget = &placed.widget;
-    let (wrap, stated, align, selectable) = (
+    // A grown child was squeezed by the layout, so the box it was given is its
+    // column: it cannot run past what taffy left beside it.
+    let stated = if widget.width > 0.0 {
+        widget.width
+    } else if widget.grow > 0.0 {
+        at.assigned.x
+    } else {
+        0.0
+    };
+    let (wrap, align, selectable) = (
         widget.wrap,
-        widget.width,
-        widget.text_align.clone(),
+        crate::widget::theme::text_align_of(style, widget).to_owned(),
         widget.selectable,
     );
     let on_link = widget.on_link.clone();
     let room = ui.available_width();
-    let width = wrap.then_some(room.max(1.0));
+    // A wrapping block takes the room; a truncating line takes its column, so
+    // the shaper knows where to cut. Neither is the other.
+    let width = if wrap {
+        Some(room.max(1.0))
+    } else if widget.truncate && stated > 0.0 {
+        Some(stated)
+    } else {
+        None
+    };
     // A stated width is a column, so a long line is cut off at its edge
     // rather than run into whatever sits beside it.
     let column = (!wrap && stated > 0.0).then_some(stated);
@@ -418,7 +437,7 @@ fn edit(
     };
     let look = at.look(index);
     crate::widget::theme::dress(ui, &look.style, color);
-    let want = box_of(widget, at.assigned);
+    let want = solved_of(widget, &at.style_of(widget), at.assigned);
     let mut edit = if multiline {
         egui::TextEdit::multiline(&mut buffer)
     } else {
@@ -443,6 +462,11 @@ fn edit(
         edit = edit.char_limit(widget.max_length as usize);
     }
     let response = ui.add(edit);
+    // Only on the pass focus was put here: asking every frame would take the
+    // caret back from whatever the reader clicked next.
+    if at.taking && at.focused == Some(entity) {
+        response.request_focus();
+    }
     if widget.numeric {
         buffer.retain(|c| c.is_ascii_digit() || matches!(c, '-' | '.'));
     }

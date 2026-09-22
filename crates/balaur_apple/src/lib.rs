@@ -591,7 +591,7 @@ fn install_apple_api(m: &mut dyn Bindings<Engine>) {
                 eng,
                 node,
                 opts.as_ref(),
-                AppleCall::CredentialState { user },
+                AppleCall::CredentialState { user: user.clone() },
             )
         },
     );
@@ -738,9 +738,9 @@ fn install_arrivals_api(m: &mut dyn Bindings<Engine>) {
                 node,
                 opts.as_ref(),
                 AppleCall::Notify {
-                    id,
-                    title,
-                    body,
+                    id: id.clone(),
+                    title: title.clone(),
+                    body: body.clone(),
                     after,
                 },
             )
@@ -811,7 +811,7 @@ fn install_store_api(m: &mut dyn Bindings<Engine>) {
             let ids = ids
                 .into_iter()
                 .map(|id| match id {
-                    Value::Str(id) => Ok(id),
+                    Value::Str(id) => Ok(id.clone()),
                     other => Err(anyhow!("a product id should be a string, got {other:?}")),
                 })
                 .collect::<Result<Vec<String>>>()?;
@@ -836,7 +836,9 @@ fn install_store_api(m: &mut dyn Bindings<Engine>) {
                 eng,
                 node,
                 opts.as_ref(),
-                AppleCall::Store(StoreCall::Purchase { product }),
+                AppleCall::Store(StoreCall::Purchase {
+                    product: product.clone(),
+                }),
             )
         },
     );
@@ -883,7 +885,9 @@ fn install_store_ledger_api(m: &mut dyn Bindings<Engine>) {
                 eng,
                 node,
                 opts.as_ref(),
-                AppleCall::Store(StoreCall::Finish { transaction }),
+                AppleCall::Store(StoreCall::Finish {
+                    transaction: transaction.clone(),
+                }),
             )
         },
     );

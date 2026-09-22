@@ -191,10 +191,7 @@ pub(crate) fn install_debug_api(m: &mut dyn Bindings<Engine>) {
         let config = config.borrow();
         let mut out = vec![("enabled".to_string(), Value::Bool(config.enabled))];
         for (name, flag) in DEBUG_MODES {
-            out.push((
-                (*name).to_string(),
-                Value::Bool(config.mode.contains(*flag)),
-            ));
+            out.push((name.to_string(), Value::Bool(config.mode.contains(*flag))));
         }
         Ok(Value::Map(out))
     });

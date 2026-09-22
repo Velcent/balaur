@@ -8,12 +8,14 @@ use super::{Classes, Function, gdscript, safe, shim_binding};
 /// The `init` hook a class with no `_ready` still needs, when it has
 /// defaults to set or a `_init` to run: nothing else would call them, and a
 /// member read before its default is set is an error at run time.
-pub(super) fn write_default_init(out: &mut String, functions: &[Function], defaults: bool) -> bool {
-    if !(defaults || constructs(functions)) || functions.iter().any(|f| f.name == "_ready") {
+pub(super) fn write_default_init(out: &mut String, functions: &[Function], scened: bool) -> bool {
+    // The plain members are the engine's to set; what is left for `init` is
+    // the half that waits for the scene, and a Godot `_init`.
+    if !(scened || constructs(functions)) || functions.iter().any(|f| f.name == "_ready") {
         return false;
     }
-    let set = if defaults {
-        "    defaults(this);\n"
+    let set = if scened {
+        "    scene_defaults(this);\n"
     } else {
         ""
     };
@@ -82,7 +84,7 @@ pub(super) fn write_constructor(
     path: &str,
     classes: &Classes,
     functions: &[Function],
-    defaults: bool,
+    members: &super::members::Members,
 ) {
     if functions.iter().any(|f| f.name == "new") {
         return;
@@ -130,8 +132,13 @@ pub(super) fn write_constructor(
         params.join(", "),
         gdscript::quoted(&module),
     );
-    if defaults {
+    // A class that is a table has no node to attach, so its constructor is
+    // where the members it declared are set.
+    if members.defaults {
         out.push_str("    defaults(this);\n");
+    }
+    if members.scened {
+        out.push_str("    scene_defaults(this);\n");
     }
     if init.is_some() {
         let mut args = vec!["this".to_string()];

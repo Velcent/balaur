@@ -47,6 +47,28 @@ PLATFORM_FLOAT_RS = re.compile(rf"(?:\.|\bf(?:32|64)::)(?:{_INEXACT_FLOAT})\(")
 # glam's own methods, which the workspace builds with glam's `libm` feature.
 GLAM_BOUND = {"crates/balaur_script_rune/src/value/glam_api.rs"}
 
+# A literal key is a second spelling of what the crate's vocabulary already
+# names (NAMING.md N17), and the reader takes the default instead of saying so.
+VOCABULARY_LITERAL = re.compile(
+    r'\bprop_(?:str|f32|f64|bool|i64|vec2|vec3)\([A-Za-z_][A-Za-z0-9_]*,\s*"'
+    r'|\b(?:params|opts|table)\.get\("'
+)
+
+# A call that can re-enter the engine and ask for the resource whose `RefCell`
+# the caller still holds; the panic that follows names neither side.
+REENTRANT_CALL = re.compile(
+    r"\b(?:call_on|call_all|call_async|invoke|hot_reload)\s*\("
+    r"|\bhost\.(?:update|fixed_update|attach|call)\s*\("
+    r"|\(\s*def\.(?:apply|get|remove)\s*\)\s*\("
+    r"|\bcomponents::(?:add|patch|remove|remove_present)\s*\("
+    r"|\binstantiate_scene\s*\("
+)
+# `let x = <something>.borrow_mut();` — the exclusive binding, not a temporary,
+# which is dropped at the end of its statement and cannot span a call.
+BORROW_BINDING = re.compile(
+    r"^\s*let\s+(?:mut\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*.*\.borrow_mut\(\)\s*;"
+)
+
 # Type suffixes a typemap entry may never take (NAMING.md N2). A denylist, not
 # an allowlist: "no suffix" is a legal category, so `ClearColor` and
 # `DebugLineBuffer` would both pass any permissive check.
@@ -500,9 +522,18 @@ def check_file(path: Path, ctx: Context) -> list[Finding]:
         for one in lines
     )
 
+    # The rule below only binds a crate that keeps one.
+    has_vocabulary = (
+        (ROOT / "crates" / crate / "src" / "vocabulary.rs").exists()
+        and rel.name != "vocabulary.rs"
+        and not is_test_file(rel)
+    )
+
     in_test_mod = False
     test_brace_depth = None
     test_attr_line = 0
+    # Live `.borrow()`/`.borrow_mut()` bindings: (name, depth it was taken at).
+    held: list[tuple[str, int]] = []
     depth = 0
     fn_start = None
     fn_depth = None
@@ -512,6 +543,11 @@ def check_file(path: Path, ctx: Context) -> list[Finding]:
 
     for i, raw in enumerate(lines, start=1):
         line = raw.strip()
+
+        if has_vocabulary and not in_test_mod and VOCABULARY_LITERAL.search(line):
+            findings.append(Finding(rel, i, "vocabulary-literal",
+                                    "a params key spelled at the call site; name it in "
+                                    "the crate's vocabulary.rs", "ERROR"))
 
         is_comment = line.startswith("//")
         # Doc comments (/// and //!) are API documentation and should be as long
@@ -600,6 +636,21 @@ def check_file(path: Path, ctx: Context) -> list[Finding]:
                                             "(ARCHITECTURE, 'What determinism is still missing', 4)",
                                             "ERROR"))
 
+            if not in_test_mod:
+                m = BORROW_BINDING.match(raw)
+                if m:
+                    held.append((m.group(1), depth))
+                for dropped in re.findall(r"\bdrop\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)", line):
+                    held = [h for h in held if h[0] != dropped]
+                call = REENTRANT_CALL.search(line)
+                if held and call and not m:
+                    names = ", ".join(f"`{n}`" for n, _ in held)
+                    findings.append(Finding(
+                        rel, i, "borrow-across-reentry",
+                        f"{names} still borrows a RefCell here, and "
+                        f"`{call.group(0).rstrip('(').strip()}` can re-enter the engine; "
+                        "read what is needed, drop the borrow, then call", "ERROR"))
+
             # `log` records carry no fields, so nothing downstream can filter on
             # them; tracing-log bridges dependencies, our own code uses tracing.
             if re.search(r"\blog::(info|warn|error|debug|trace)!", line):
@@ -637,6 +688,7 @@ def check_file(path: Path, ctx: Context) -> list[Finding]:
                 fn_depth = depth
             code = LITERAL.sub("", raw)
             depth += code.count("{") - code.count("}")
+            held = [h for h in held if h[1] <= depth]
             if fn_start is not None and fn_depth is not None and depth <= fn_depth and i > fn_start:
                 length = i - fn_start + 1
                 if length > MAX_FN_LINES:
@@ -655,6 +707,40 @@ def check_file(path: Path, ctx: Context) -> list[Finding]:
     return findings
 
 
+SHOWCASE = ROOT / "scripts" / "showcase.sh"
+TAKE = re.compile(
+    r"^(?:shot|clip|screen|screen_clip|scene_shot|import_shot|import_clip|godot_clip)"
+    r"\s+(\S+)", re.M)
+FILED = re.compile(r"^(\d+\.\d+) (\S+)$", re.M)
+# Two takes the file runs as functions rather than as a line of its own.
+BESPOKE_TAKES = {"covers", "objects"}
+
+
+def check_showcase() -> list[Finding]:
+    """Every picture the showcase takes names the milestone its subject
+    shipped in, and every milestone names a take. Without both halves a
+    `--milestone` run silently skips a take, or keeps rendering one nothing
+    asks for."""
+    if not SHOWCASE.exists():
+        return []
+    text = SHOWCASE.read_text()
+    lines = text.splitlines()
+    # The list is the file's own head; the takes are what follows it.
+    body = text[text.find("backup_examples"):]
+    taken = set(TAKE.findall(body)) | BESPOKE_TAKES
+    filed = {name for _, name in FILED.findall(text)}
+    out = []
+    for name in sorted(taken - filed):
+        line = next((i + 1 for i, l in enumerate(lines) if f" {name} " in l or l.endswith(f" {name}")), 1)
+        out.append(Finding(SHOWCASE, line, "showcase-milestone",
+                           f"{name} is filed under no milestone", "ERROR"))
+    for name in sorted(filed - taken):
+        line = next((i + 1 for i, l in enumerate(lines) if l.endswith(f" {name}")), 1)
+        out.append(Finding(SHOWCASE, line, "showcase-milestone",
+                           f"{name} is filed under a milestone and taken by nothing", "ERROR"))
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--fail-on-error", action="store_true")
@@ -671,6 +757,7 @@ def main() -> int:
         findings.extend(check_file(path, ctx))
     for path in rune_files():
         findings.extend(check_rune(path))
+    findings.extend(check_showcase())
 
     errors = [f for f in findings if f.severity == "ERROR"]
     reports = [f for f in findings if f.severity == "REPORT"]

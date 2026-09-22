@@ -57,12 +57,14 @@ pub(crate) fn assets_save(eng: &Engine, args: &[Value]) -> Result<Value> {
 /// project's `.toml` files; answers the files rewritten.
 pub(crate) fn assets_rename(eng: &Engine, args: &[Value]) -> Result<Value> {
     let rewritten = crate::asset_index::rename(eng, text(args, 0)?, text(args, 1)?)?;
-    Ok(Value::List(rewritten.into_iter().map(Value::Str).collect()))
+    Ok(Value::List(
+        rewritten.into_iter().map(Value::text).collect(),
+    ))
 }
 
 /// The id `assets/index.toml` gives a path, or nil when it has none.
 pub(crate) fn assets_id(eng: &Engine, args: &[Value]) -> Result<Value> {
-    Ok(crate::asset_index::id_of(eng, text(args, 0)?)?.map_or(Value::Nil, Value::Str))
+    Ok(crate::asset_index::id_of(eng, text(args, 0)?)?.map_or(Value::Nil, Value::text))
 }
 
 /// The id a file has, giving it one and writing the index if it has none.
@@ -231,7 +233,7 @@ pub(crate) fn unix_time(eng: &Engine, _: &[Value]) -> Result<Value> {
 pub(crate) fn strings_system_locale(eng: &Engine, _: &[Value]) -> Result<Value> {
     Ok(crate::facts::platform(eng)
         .system_locale
-        .map_or(Value::Nil, Value::Str))
+        .map_or(Value::Nil, Value::text))
 }
 
 pub(crate) fn scene_tagged(eng: &Engine, args: &[Value]) -> Result<Value> {
@@ -263,7 +265,7 @@ pub(crate) fn rng_uuid(eng: &Engine, _: &[Value]) -> Result<Value> {
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
     let hex = hex_of(&bytes);
-    Ok(Value::Str(format!(
+    Ok(Value::text(format!(
         "{}-{}-{}-{}-{}",
         &hex[0..8],
         &hex[8..12],

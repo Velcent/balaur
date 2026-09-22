@@ -68,7 +68,7 @@ fn typed_registration_survives_erasure() {
         m.get("gravity_scale")(&host, &[Value::Num(1.5)]).unwrap(),
         Value::Num(3.0)
     );
-    assert_eq!(m.constants, [("DYNAMIC".to_string(), Value::Int(0))]);
+    assert_eq!(m.constants, [(String::from("DYNAMIC"), Value::Int(0))]);
 }
 
 #[test]

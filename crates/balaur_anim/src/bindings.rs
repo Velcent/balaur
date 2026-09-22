@@ -70,7 +70,7 @@ fn install_machine_api(m: &mut dyn Bindings<Engine>) {
         },
     );
     m.function("state", |eng: &Engine, node: NodeId| {
-        Ok(crate::machine::state(eng, entity_of(node)?).map_or(Value::Nil, Value::Str))
+        Ok(crate::machine::state(eng, entity_of(node)?).map_or(Value::Nil, Value::text))
     });
 }
 

@@ -266,11 +266,7 @@ def component_row(prop, spec):
         notes.append(f"Scene shorthand: <code>{html.escape(prop)}</code>'s value can be given as the component's whole value.")
     if spec.get("readonly"):
         notes.append("Read-only: engine output the inspector shows but never writes.")
-    kind = spec.get("type", "")
-    if kind == "asset":
-        kind = f"asset · <code>{html.escape(spec.get('asset', ''))}</code>"
-    else:
-        kind = html.escape(kind)
+    kind = datatype_of(spec)
     default = json.dumps(spec.get("default", "")).strip('"')
     cells = (
         f"<code>{html.escape(prop)}</code>",
@@ -279,6 +275,20 @@ def component_row(prop, spec):
         " ".join(n for n in notes if n),
     )
     return "<tr>" + "".join(f"<td>{c}</td>" for c in cells) + "</tr>"
+
+
+def datatype_of(spec):
+    """A property's type as the reference names it, a composite saying what it
+    holds: the column is the answer to "what may I write here?"."""
+    kind = spec.get("type", "")
+    if kind == "asset":
+        return f"asset · <code>{html.escape(spec.get('asset', ''))}</code>"
+    if kind in ("list", "map"):
+        return f"{kind} of {datatype_of(spec.get('of', {}))}"
+    if kind == "record":
+        fields = ", ".join(sorted(spec.get("fields", {})))
+        return f"record · <code>{html.escape(fields)}</code>"
+    return html.escape(kind)
 
 
 # Section order for the component reference. A component lands in the first
@@ -591,6 +601,27 @@ def gen_assets(asset_types, functions, components):
     return "".join(out)
 
 
+def gen_script_types(api):
+    body = (
+        "# Script value types\n\nThe maths types a script holds as values: `balaur::Vec2` and the rest,\n"
+        "each glam's own type under a script name. A name bound to one holds its\n"
+        "own copy, and every method is glam's, bound by\n"
+        "`scripts/gen_glam_api.py`. Read from a booted engine.\n\n"
+    )
+    types = api.get("types", [])
+    body += "| Type | Functions | Constants |\n| --- | ---: | ---: |\n"
+    for entry in types:
+        body += f"| [`balaur::{entry['name']}`](#balaur{entry['name'].lower()}) | {len(entry['functions'])} | {len(entry['constants'])} |\n"
+    body += "\n"
+    for entry in types:
+        body += f"## `balaur::{entry['name']}`\n\n"
+        if entry["functions"]:
+            body += "**Functions:** " + ", ".join(f"`{f}`" for f in entry["functions"]) + "\n\n"
+        if entry["constants"]:
+            body += "**Constants:** " + ", ".join(f"`{c}`" for c in entry["constants"]) + "\n\n"
+    return body
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--check", action="store_true", help="fail if the files on disk are stale")
@@ -603,6 +634,7 @@ def main():
     files = {
         "crate-graph.md": gen_graph(crates),
         "script-api.md": gen_script_api(api, owners),
+        "script-types.md": gen_script_types(api),
         "components.md": gen_components(
             api.get("components", {}),
             api.get("component_tags", {}),

@@ -371,11 +371,11 @@ fn diverged(eng: &Engine, _: &[Value]) -> Result<Value> {
                 ("tick".into(), count(d.tick)),
                 (
                     "recorded".into(),
-                    Value::Str(format!("{:016x}", d.recorded)),
+                    Value::text(format!("{:016x}", d.recorded)),
                 ),
                 (
                     "replayed".into(),
-                    Value::Str(format!("{:016x}", d.replayed)),
+                    Value::text(format!("{:016x}", d.replayed)),
                 ),
             ])
         }))

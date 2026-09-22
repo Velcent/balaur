@@ -639,7 +639,7 @@ fn loaded_plugins(eng: &Engine, _: &[Value]) -> Result<Value> {
     Ok(Value::List(
         crate::plugins::names(eng)
             .into_iter()
-            .map(Value::Str)
+            .map(Value::text)
             .collect(),
     ))
 }
@@ -719,7 +719,7 @@ fn args(eng: &Engine, _: &[Value]) -> Result<Value> {
         .try_resource::<crate::app::ScriptArgs>()
         .map(|a| a.borrow().0.clone())
         .unwrap_or_default();
-    Ok(Value::List(list.into_iter().map(Value::Str).collect()))
+    Ok(Value::List(list.into_iter().map(Value::text).collect()))
 }
 
 /// A writable per-user directory for saves and settings, created on first
@@ -851,7 +851,7 @@ fn source(eng: &Engine, args: &[Value]) -> Result<Value> {
         .script_host()
         .and_then(|host| host.scene_source(rel))
         .or_else(|| crate::project::scene_text(eng, rel).ok())
-        .map_or(Value::Nil, Value::Str))
+        .map_or(Value::Nil, Value::text))
 }
 
 /// The names of every registered component TYPE, not the components on any
@@ -860,7 +860,7 @@ fn component_types(eng: &Engine, _: &[Value]) -> Result<Value> {
     Ok(Value::List(
         crate::components::names(eng)
             .into_iter()
-            .map(Value::Str)
+            .map(Value::text)
             .collect(),
     ))
 }
@@ -899,7 +899,7 @@ fn presets(eng: &Engine, _: &[Value]) -> Result<Value> {
     Ok(Value::List(
         crate::presets::names(eng)
             .into_iter()
-            .map(Value::Str)
+            .map(Value::text)
             .collect(),
     ))
 }
@@ -917,7 +917,7 @@ fn preset_info(eng: &Engine, args: &[Value]) -> Result<Value> {
             ),
             (
                 "tags".to_string(),
-                Value::List(def.tags.iter().cloned().map(Value::Str).collect()),
+                Value::List(def.tags.iter().cloned().map(Value::text).collect()),
             ),
             (
                 "components".to_string(),
@@ -951,7 +951,7 @@ fn unmet_expectations(eng: &Engine, args: &[Value]) -> Result<Value> {
                     ("component".to_string(), Value::Str(component)),
                     (
                         "expects".to_string(),
-                        Value::List(expects.into_iter().map(Value::Str).collect()),
+                        Value::List(expects.into_iter().map(Value::text).collect()),
                     ),
                 ])
             })
@@ -997,7 +997,7 @@ fn strings_locales(eng: &Engine, _: &[Value]) -> Result<Value> {
     Ok(Value::List(
         crate::strings::locales(eng)
             .into_iter()
-            .map(Value::Str)
+            .map(Value::text)
             .collect(),
     ))
 }
@@ -1015,7 +1015,7 @@ fn save_slots(eng: &Engine, _: &[Value]) -> Result<Value> {
     Ok(Value::List(
         crate::save::slots(eng)
             .into_iter()
-            .map(Value::Str)
+            .map(Value::text)
             .collect(),
     ))
 }

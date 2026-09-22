@@ -156,7 +156,7 @@ impl Variables {
         self.declared
             .iter()
             .filter(|(_, v)| v.persist)
-            .map(|(name, v)| (name.clone(), v.value.clone()))
+            .map(|(name, v)| (name.as_str().into(), v.value.clone()))
             .collect()
     }
 }

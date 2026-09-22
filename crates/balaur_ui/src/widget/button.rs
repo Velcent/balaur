@@ -155,8 +155,11 @@ fn paint_face(
     }
     if let Some(icon) = &face.icon {
         let y = rect.center().y - icon.size().y / 2.0;
+        // A glyph icon answers `icon_color` as a picture does, so a row that
+        // tints its mark per component does not have to draw itself.
+        let tint = style.icon_color.unwrap_or(ink);
         ui.painter()
-            .galley(pos2(at_x, y), std::sync::Arc::clone(icon), ink);
+            .galley(pos2(at_x, y), std::sync::Arc::clone(icon), tint);
         at_x += icon.size().x + face.gap;
     }
     if let Some((shaped, texture)) = &face.shaped {
@@ -221,7 +224,7 @@ pub(crate) fn button(
     let floor = vec2(base.width.unwrap_or(0.0), base.height.unwrap_or(0.0));
     // The box the layout handed it too: a button in a column fills its width
     // rather than hugging its caption, as it does in Godot and in CSS.
-    let given = crate::widget::arrange::box_of(&widget, at.assigned);
+    let given = crate::widget::arrange::solved_of(&widget, &at.style_of(&widget), at.assigned);
     let min = (face.size + vec2(pad_x, ui.spacing().button_padding.y) * 2.0)
         .max(vec2(widget.width, widget.height))
         .max(floor)

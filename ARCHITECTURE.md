@@ -83,13 +83,17 @@ animation) → FixedUpdate (scripts, physics) → PostUpdate (audio) → SceneSy
 
 ### The seam
 
-`balaur_script` is traits and a neutral `Value`, two dependencies (`anyhow`,
-`serde`), no language. Subsystems declare against `Bindings<Engine>`; a backend implements
+`balaur_script` is traits and a neutral `Value`, three dependencies (`anyhow`,
+`serde`, `smol_str`), no language. Subsystems declare against `Bindings<Engine>`; a backend implements
 `ScriptHost<Engine>`. Rune cost one crate and changed nothing else.
 
 - Operations are declared once in core (`node_api.rs` `NODE_OPS`,
   `engine_api.rs` `ENGINE_OPS`) and reach every language. A second language
   costs the call sugar, not the operations.
+- A `Str` and a `Map` key are `SmolStr`, which holds up to 22 bytes inline.
+  Almost every string crossing the seam is a component name, a property key or
+  a node path, and each one used to reach the allocator on the way in: a short
+  string argument cost 81 ns more than an integer one.
 - `Value` is `Nil/Bool/Int/Num/Str/Bytes/Vec2/Vec3/Color/List/Map`, plus
   `Node(u64)` (opaque entity bits) and `Callback(id)`, valid only for the call
   that received it. `Many` is several return values, not a list.
@@ -221,7 +225,7 @@ Breakpoints, stepping and a call stack with locals, for scripts in the editor.
 
 `App::register_component` takes a TOML schema — a `type` per property from the
 closed set (`float`, `int`, `bool`, `string`, `enum`, `flags`, `vec2`,
-`vec3`, `vec4`, `color`, `asset`, `node`, `nodes`, `strings`), defaults,
+`vec3`, `vec4`, `color`, `asset`, `node`, `list`, `map`, `record`), defaults,
 options, ranges, `readonly`, `description`, `unit`, `group` — plus apply, get
 and remove hooks.
 
@@ -232,6 +236,15 @@ and remove hooks.
   property: a bad schema fails at boot, not at the first inspector row.
 - A tagged union's discriminant is always `kind`; `type` is always the datatype
   (N6). A `color` takes floats or `#rrggbb[aa]`, expanded before `apply`.
+- Three types hold others: a `list` and a `map` name what they hold in `of`, a
+  `record` names one spec per field in `fields`, and each of those is a whole
+  spec, so `min`, `options`, `asset` and `component` work at any depth. A
+  nested spec may leave its `default` out and registration writes the type's
+  zero in. A `map`'s `key` is `"string"` or `"int"`, and the file spells a
+  number key `"7"` either way. A `record` may name a script `class`, and the
+  host hands that script an instance of its own struct: the fork carries
+  `Value::struct_parts` and `Unit::new_struct` for it, because Rune keeps a
+  dynamic struct private to its crate.
 - Two verbs: `set_component` merges over schema defaults (whole component),
   `components::patch` merges over the component's own `get` (leaves the rest).
   Animation and the inspector need the second — patching `collider3d/radius` with the
@@ -247,6 +260,16 @@ and remove hooks.
   `scene.component_types`, `scene.component_schema`) and the editor: the
   Add-component palette and every inspector row are generated from the registry,
   so a third-party component needs no editor change.
+- **A build may register 128**, one bit each in `components::Attached`, and
+  registering the 129th panics naming it. 48 are in tree, so 80 are left for
+  plugins; the cap is a `u128` per node that carries any, which is what makes
+  a presence test a shift and a free ask only the plugins it owes.
+- **A name is a number at run time.** Registration order is the component's
+  index, and `index_of`, `property_at`, `patch_at` and the `Attached` bits all
+  take that number. A backend resolves a name once, when it builds its
+  handles, the way `MaterialId::intern` does for materials: dispatch costs
+  neither a hash nor a string. `transform` registers first and owns bit 0, so
+  the node bundle can say a node has one without reaching the registry.
 - In tree: 48, from `transform` in core through physics, render, UI and
   animation; `docs/generated/components.md` lists them. `shape3d`, `shape2d`
   and `sprite` each carry their own `color` property, since a tint needs

@@ -422,6 +422,66 @@ fn face_theme(dir: &std::path::Path) {
 
 /// A role's `align = "left"` reaches a node button. It reached script pills
 /// only, so a node `row` drew its caption in the middle of the row.
+/// A widget inside a `scroll` keeps the theme its ancestor named. A scroll
+/// is solved as a tree of its own, and measuring a leaf in it resolved only
+/// that leaf's own `theme`, cached the themeless look it got, and the draw
+/// answered out of that cache: the editor's transport drew in the near-white
+/// a widget with no theme takes, which is invisible on a light theme.
+#[test]
+fn a_widget_under_a_scroll_keeps_its_ancestor_s_theme() {
+    let (dir, app) = app();
+    std::fs::create_dir_all(dir.path().join("themes")).unwrap();
+    std::fs::write(
+        dir.path().join("themes/ink.toml"),
+        "type = \"widget_theme\"\n\n[colors]\nmark = \"#5b6670\"\n\n[roles.transport]\nd = 26\ncolor = \"mark\"\n",
+    )
+    .unwrap();
+    let icon = "\u{e1dc}";
+    let root = add_widget(
+        &app,
+        &toml::toml! { kind = "column" theme = "themes/ink.toml" x = 0.0 y = 0.0 width = 300.0 height = 120.0 }
+            .into(),
+    );
+    let kid = |parent, name: &str, params: toml::Value| {
+        let node = balaur::scene::spawn_node(&mut app.engine.world_mut(), name, parent);
+        balaur::components::add(&app.engine, node, "widget", Some(&params)).unwrap();
+        node
+    };
+    let scroll = kid(
+        root,
+        "Scroll",
+        toml::toml! { kind = "scroll" grow = 1 }.into(),
+    );
+    let strip = kid(
+        scroll,
+        "Strip",
+        toml::toml! { kind = "row" grow = 1 }.into(),
+    );
+    kid(
+        strip,
+        "Mark",
+        toml::toml! { kind = "button" text = "" icon = (icon) role = "transport" }.into(),
+    );
+    let ctx = egui::Context::default();
+    settle(&app, &ctx);
+    let out = pass(&app, &ctx, vec![]);
+    let ink = out
+        .shapes
+        .iter()
+        .find_map(|shape| match &shape.shape {
+            egui::epaint::Shape::Text(text) if text.galley.text() == icon => {
+                Some(text.fallback_color)
+            }
+            _ => None,
+        })
+        .expect("the glyph drew");
+    assert_eq!(
+        ink,
+        egui::Color32::from_rgb(0x5b, 0x66, 0x70),
+        "the glyph took no theme"
+    );
+}
+
 #[test]
 fn a_role_puts_a_button_s_face_at_its_left_edge() {
     let (dir, app) = app();

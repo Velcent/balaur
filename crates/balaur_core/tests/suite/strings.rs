@@ -85,7 +85,7 @@ fn a_key_nothing_has_comes_back_as_itself() {
 fn an_argument_is_interpolated_by_name() {
     let dir = project("", &[("en.toml", EN)]);
     let app = app_in(dir.path());
-    let args = vec![("name".to_string(), Value::Str("Vasilisa".into()))];
+    let args = vec![("name".into(), Value::Str("Vasilisa".into()))];
     assert_eq!(
         strings::tr(&app.engine, "menu.greet", &args),
         "Hello, Vasilisa"
@@ -98,7 +98,7 @@ fn an_argument_is_interpolated_by_name() {
 fn a_placeholder_with_no_argument_is_left_alone() {
     let dir = project("", &[("en.toml", EN)]);
     let app = app_in(dir.path());
-    let args = vec![("other".to_string(), Value::Int(1))];
+    let args = vec![("other".into(), Value::Int(1))];
     assert_eq!(
         strings::tr(&app.engine, "menu.greet", &args),
         "Hello, {name}"
