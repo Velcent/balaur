@@ -56,7 +56,7 @@ RUN set -eux; \
       amd64) rc_arch=x86_64 ;; \
       *) echo "unsupported architecture ${TARGETARCH}" >&2; exit 1 ;; \
     esac; \
-    curl -fsSL -o /tmp/rcodesign.tar.gz \
+    curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors -o /tmp/rcodesign.tar.gz \
       "https://github.com/indygreg/apple-platform-rs/releases/download/apple-codesign%2F${RCODESIGN_VERSION}/apple-codesign-${RCODESIGN_VERSION}-${rc_arch}-unknown-linux-musl.tar.gz"; \
     tar xzf /tmp/rcodesign.tar.gz -C /tmp; \
     mv /tmp/apple-codesign-*/rcodesign /usr/local/bin/rcodesign; \
@@ -84,7 +84,7 @@ RUN set -eux; \
         zlib1g:amd64; \
     fi; \
     mkdir -p "${ANDROID_HOME}/cmdline-tools"; \
-    curl -fsSL -o /tmp/tools.zip \
+    curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors -o /tmp/tools.zip \
       "https://dl.google.com/android/repository/commandlinetools-linux-${ANDROID_CMDLINE_TOOLS}_latest.zip"; \
     unzip -q /tmp/tools.zip -d "${ANDROID_HOME}/cmdline-tools"; \
     mv "${ANDROID_HOME}/cmdline-tools/cmdline-tools" "${ANDROID_HOME}/cmdline-tools/latest"; \

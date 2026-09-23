@@ -113,9 +113,12 @@ ARG ANDROID_BUILD_TOOLS=35.0.0
 ARG ANDROID_PLATFORM=android-35
 ARG ANDROID_CMDLINE_TOOLS=11076708
 
+# `--retry-all-errors`, not just `--retry`: dl.google.com ends a stream with
+# HTTP/2 INTERNAL_ERROR (curl 92), which plain --retry does not cover, and one
+# flake there fails the whole multi-arch build.
 RUN set -eux; \
     mkdir -p "${ANDROID_HOME}/cmdline-tools"; \
-    curl -fsSL -o /tmp/tools.zip \
+    curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors -o /tmp/tools.zip \
       "https://dl.google.com/android/repository/commandlinetools-linux-${ANDROID_CMDLINE_TOOLS}_latest.zip"; \
     unzip -q /tmp/tools.zip -d "${ANDROID_HOME}/cmdline-tools"; \
     mv "${ANDROID_HOME}/cmdline-tools/cmdline-tools" "${ANDROID_HOME}/cmdline-tools/latest"; \

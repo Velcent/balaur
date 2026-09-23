@@ -44,8 +44,13 @@ const server = http.createServer((q, s) => {
     s.end(page(current));
     return;
   }
-  const file = path.join(dir, path.basename(url.pathname));
-  if (!fs.existsSync(file)) {
+  // Resolved under `dir`, not flattened to its basename: balaur.js imports
+  // wasm-bindgen's `snippets/<crate>-<hash>/inline0.js`, and a basename turns
+  // that into a 404 the page reports as "failed to fetch balaur.js".
+  const root = path.resolve(dir);
+  const file = path.resolve(root, '.' + path.posix.normalize(url.pathname));
+  const inside = file === root || file.startsWith(root + path.sep);
+  if (!inside || !fs.existsSync(file) || !fs.statSync(file).isFile()) {
     s.statusCode = 404;
     s.end();
     return;

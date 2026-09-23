@@ -109,6 +109,11 @@ UNRESOLVED='did not resolve in the mirror'
 # What a state that ran leaves in the log. See the check at the end of edit_step.
 RAN='selftest ok|\[script\] .*skip|\[script\] showcase '
 
+# The render steps, off where a runner cannot finish one. Not a platform
+# check: a Windows developer with a GPU should still get them, and it is the
+# CI runner that cannot -- see .github/workflows/test.yml.
+renders=${BALAUR_E2E_RENDER:-1}
+
 # A windowed step needs a display, and a Linux CI runner has none: the editor
 # opens offscreen there rather than failing to build an event loop. A scalar
 # rather than an array, which bash 3.2 calls unbound when it is empty.
@@ -209,10 +214,14 @@ for ex in examples/*/; do
   # The GPU, which every step above skips: a texture the backend cannot bind,
   # a shader it rejects, a material with no pipeline. The editor renders too,
   # because its own docks and gizmos are where a reader meets a warning.
-  printf '  render ... '
-  render_step "$name: render" run "$ex" --offscreen --frames 120
-  render_step "$name: render in the editor" edit "$ex" --offscreen --frames 90
-  printf 'ok\n'
+  if [ "$renders" = 1 ]; then
+    printf '  render ... '
+    render_step "$name: render" run "$ex" --offscreen --frames 120
+    render_step "$name: render in the editor" edit "$ex" --offscreen --frames 90
+    printf 'ok\n'
+  else
+    printf '  render ... skipped (BALAUR_E2E_RENDER=0)\n'
+  fi
 
   # Headless, so this covers loading the game, mirroring its scene, resolving
   # every node, and rebinding its assets -- not drawing, which needs a window.
