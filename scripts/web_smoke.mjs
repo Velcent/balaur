@@ -29,10 +29,28 @@ cases.push({ name: 'editor', start: `start_editor('c', '/editor.bpak', '/hello.b
 const page = (start) => `<!doctype html><html><head><link rel="icon" href="data:,"></head>
 <body style="margin:0"><canvas id="c" style="display:block;width:960px;height:540px"></canvas>
 <script type="module">
-if (!navigator.gpu || !(await navigator.gpu.requestAdapter())) console.error('smoke: no WebGPU adapter');
+let gpu = null;
+for (let i = 0; i < 20 && !gpu; i++) {
+  gpu = navigator.gpu ? await navigator.gpu.requestAdapter().catch(() => null) : null;
+  if (!gpu) await new Promise((r) => setTimeout(r, 250));
+}
+if (!gpu) console.error('smoke: no WebGPU adapter');
 const mod = await import('/balaur.js');
 await mod.default({ module_or_path: '/balaur_bg.wasm' });
 mod.${start}.catch((e) => console.error('smoke: start failed', e));
+</script></body></html>`;
+
+// Somewhere to bring the GPU process up before any pack is judged. Chrome
+// answers the first requestAdapter with null and logs a stale instance while
+// SwiftShader settles, and that used to fail whichever pack happened to be
+// first -- angrynerds, which drew correctly the whole time.
+const warmup = `<!doctype html><html><body><script type="module">
+for (let i = 0; i < 40; i++) {
+  const a = navigator.gpu ? await navigator.gpu.requestAdapter().catch(() => null) : null;
+  if (a) break;
+  await new Promise((r) => setTimeout(r, 250));
+}
+document.title = 'warm';
 </script></body></html>`;
 
 let current = '';
@@ -41,7 +59,7 @@ const server = http.createServer((q, s) => {
   const url = new URL(q.url, 'http://x');
   if (url.pathname === '/') {
     s.setHeader('Content-Type', 'text/html');
-    s.end(page(current));
+    s.end(current ? page(current) : warmup);
     return;
   }
   // Resolved under `dir`, not flattened to its basename: balaur.js imports
@@ -150,6 +168,17 @@ const colours = `(async () => {
 })()`;
 
 const failures = [];
+current = '';
+await send('Page.navigate', { url: `${origin}/` });
+for (let i = 0; i < 40; i++) {
+  const warm = (await send('Runtime.evaluate', { expression: 'document.title', returnByValue: true }))
+    ?.result?.value;
+  if (warm === 'warm') break;
+  await sleep(500);
+}
+// Whatever the browser said while it was starting is not a pack's fault.
+heard = [];
+
 for (const c of cases) {
   current = c.start;
   heard = [];
