@@ -73,21 +73,36 @@ const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'balaur-smoke-'));
 const port = 9300 + Math.floor(Math.random() * 600);
 const browser = spawn(chrome, ['--headless=new', `--remote-debugging-port=${port}`,
   `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check',
-  '--window-size=1280,800', ...flags, 'about:blank'], { stdio: 'ignore' });
+  '--window-size=1280,800', ...flags, 'about:blank'],
+  { stdio: ['ignore', 'ignore', 'pipe'] });
+// Chrome's own reason for not starting. `stdio: 'ignore'` threw it away, so a
+// browser that refused to come up read only as "did not open a debugging
+// port" -- true, and not something anyone can act on.
+let said = '';
+browser.stderr.on('data', (d) => { said = (said + d).slice(-4096); });
+let exited = null;
+browser.on('exit', (code, signal) => { exited = signal ?? code; });
 // However this ends, a failure, a closed pipe or ^C, the browser goes with it.
 process.on('exit', () => browser.kill('SIGKILL'));
 for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(signal, () => process.exit(1));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 let target;
-for (let i = 0; i < 100 && !target; i++) {
+// `exited` stops the wait the moment the browser is gone: a Chrome that dies
+// on a bad flag did so in the first second, and 20s of polling a dead port
+// only delays the message.
+for (let i = 0; i < 100 && !target && exited === null; i++) {
   await sleep(200);
   try {
     const list = await (await fetch(`http://127.0.0.1:${port}/json`)).json();
     target = list.find((t) => t.type === 'page');
   } catch {}
 }
-if (!target) fail(`${chrome} did not open a debugging port`);
+if (!target) {
+  const how = exited === null ? 'is still running' : `exited ${exited}`;
+  const why = said.trim().split('\n').slice(-6).join(' | ');
+  fail(`${chrome} did not open a debugging port; it ${how}${why ? `: ${why}` : ' and said nothing'}`);
+}
 const ws = new WebSocket(target.webSocketDebuggerUrl);
 await new Promise((r) => ws.addEventListener('open', r));
 let id = 0;

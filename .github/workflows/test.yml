@@ -109,12 +109,12 @@ jobs:
           cargo build -p balaur_cli --no-default-features
           cargo test -p balaur_core -p balaur_physics --no-default-features
       # examples/ are Balaur projects, not cargo examples; scripts/e2e.sh says
-      # why all five modes are needed. Render is off on Windows: even with a
-      # Mesa adapter and a 4.6 GL context it exits 122, logging nothing.
+      # why all five modes are needed. Windows keeps check/run/export/play:
+      # render and the editor both exit 122 there, logging nothing.
       - name: E2E — run, export, play, edit and render every example project
         shell: bash
         env:
-          BALAUR_E2E_RENDER: ${{ runner.os == 'Windows' && '0' || '1' }}
+          BALAUR_E2E_GPU: ${{ runner.os == 'Windows' && '0' || '1' }}
         run: ./scripts/e2e.sh
       - name: Upload pack digests
         uses: actions/upload-artifact@v7

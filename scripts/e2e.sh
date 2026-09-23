@@ -109,10 +109,10 @@ UNRESOLVED='did not resolve in the mirror'
 # What a state that ran leaves in the log. See the check at the end of edit_step.
 RAN='selftest ok|\[script\] .*skip|\[script\] showcase '
 
-# The render steps, off where a runner cannot finish one. Not a platform
-# check: a Windows developer with a GPU should still get them, and it is the
-# CI runner that cannot -- see .github/workflows/test.yml.
-renders=${BALAUR_E2E_RENDER:-1}
+# The render and editor steps, off where a runner finishes neither: both want
+# a device, and the Windows runner exits 122 on each. Not a platform check --
+# a Windows developer with a GPU still gets them.
+gpu=${BALAUR_E2E_GPU:-1}
 
 # A windowed step needs a display, and a Linux CI runner has none: the editor
 # opens offscreen there rather than failing to build an event loop. A scalar
@@ -166,6 +166,84 @@ for project in editor editor/library editor/library/templates/*/; do
   printf 'ok\n'
 done
 
+
+# The editor's own states, run once rather than once per example: they drive
+# the editor and not the project under it -- the tiles tool builds its own
+# map, the layout one opens no document. Move a block to the loop to change that.
+editor_states() {
+  local ex=$1 name
+  name=$(basename "${ex%/}")
+  printf '\n== editor states (on %s)\n' "$name"
+
+  # The centre's layout: with no document open the viewport must fill it.
+  printf '  layout ... '
+  edit_step "$name: layout" "$ex" layoutdemo
+  printf 'ok\n'
+
+  # The node picker: what it groups a type under, and that a pick builds one.
+  printf '  picker ... '
+  edit_step "$name: picker" "$ex" pickerdemo
+  printf 'ok\n'
+
+  # The Tiles tool builds its own map, so it needs nothing from the project.
+  printf '  tiles ...  '
+  edit_step "$name: tiles" "$ex" tilesdemo
+  printf 'ok\n'
+
+  # The showcase seam: a scripted sequence feeds input and drives the
+  # editor; ninety frames of it is enough to fail on a broken call.
+  printf '  show ...   '
+  edit_step "$name: showcase" "$ex" "show:input,input"
+  printf 'ok\n'
+
+  # The editor plugin seam, from editor/plugins/counter.rn: a dock tab, a
+  # window, a palette command, an inspector section and this state itself.
+  printf '  plugin ... '
+  edit_step "$name: plugin" "$ex" counterdemo
+  printf 'ok\n'
+
+  # Copy and paste, which the shell drives from a clipboard event no headless
+  # run can raise, and the Assets dock's three filesystem verbs.
+  printf '  clip ...   '
+  edit_step "$name: clipboard" "$ex" clipdemo
+  edit_step "$name: script paths" "$ex" scriptdemo
+  printf 'ok\n'
+
+  # The profiler's data path: every stage named, the frame covering them.
+  printf '  timings ...'
+  edit_step "$name: timings" "$ex" timingsdemo
+  printf 'ok\n'
+  printf '  session ...'
+  edit_step "$name: session" "$ex" sessiondemo
+  printf 'ok\n'
+
+  # The theme switch, both ways: light and back to dark.
+  printf '  theme ...  '
+  edit_step "$name: theme" "$ex" themedemo
+  printf 'ok\n'
+
+  # Drag-in, one case per extension, and the file a drop copies in.
+  printf '  drop ...   '
+  edit_step "$name: drag-in" "$ex" dropdemo
+  printf 'ok\n'
+
+  # The Events view: a row added and undone, and the Rune it writes.
+  printf '  events ... '
+  edit_step "$name: events" "$ex" eventsdemo
+  printf 'ok\n'
+
+  # The library: a material copied in and pointed at the selection.
+  printf '  library ...'
+  edit_step "$name: library" "$ex" librarydemo
+  edit_step "$name: rows" "$ex" rowsdemo
+  printf 'ok\n'
+
+  # The Pen: anchors, a handle, the loop closed, and the asset it writes.
+  printf '  pen ...    '
+  edit_step "$name: pen" "$ex" pendemo
+  printf 'ok\n'
+}
+
 for ex in examples/*/; do
   name=$(basename "$ex")
   if [ ${#only[@]} -gt 0 ]; then
@@ -186,6 +264,10 @@ for ex in examples/*/; do
   # The editor's Problems list, headless: every script a scene attaches,
   # compiled. Cheaper than running one, and it names the file and the line.
   # `--strict` so a new warning fails here rather than sitting in the output.
+  if [ -z "${states_on:-}" ]; then
+    states_on=$ex
+  fi
+
   printf '  check ...  '
   step "$name: check" check "$ex" --strict
   printf 'ok\n'
@@ -214,14 +296,15 @@ for ex in examples/*/; do
   # The GPU, which every step above skips: a texture the backend cannot bind,
   # a shader it rejects, a material with no pipeline. The editor renders too,
   # because its own docks and gizmos are where a reader meets a warning.
-  if [ "$renders" = 1 ]; then
-    printf '  render ... '
-    render_step "$name: render" run "$ex" --offscreen --frames 120
-    render_step "$name: render in the editor" edit "$ex" --offscreen --frames 90
-    printf 'ok\n'
-  else
-    printf '  render ... skipped (BALAUR_E2E_RENDER=0)\n'
+  if [ "$gpu" != 1 ]; then
+    printf '  render ... skipped, and the editor steps with it (BALAUR_E2E_GPU=0)\n'
+    continue
   fi
+
+  printf '  render ... '
+  render_step "$name: render" run "$ex" --offscreen --frames 120
+  render_step "$name: render in the editor" edit "$ex" --offscreen --frames 90
+  printf 'ok\n'
 
   # Headless, so this covers loading the game, mirroring its scene, resolving
   # every node, and rebinding its assets -- not drawing, which needs a window.
@@ -235,15 +318,7 @@ for ex in examples/*/; do
   edit_step "$name: undo" "$ex" undodemo
   printf 'ok\n'
 
-  # The centre's layout: with no document open the viewport must fill it.
-  printf '  layout ... '
-  edit_step "$name: layout" "$ex" layoutdemo
-  printf 'ok\n'
 
-  # The node picker: what it groups a type under, and that a pick builds one.
-  printf '  picker ... '
-  edit_step "$name: picker" "$ex" pickerdemo
-  printf 'ok\n'
 
   # Renaming, which nothing in the shell could do before.
   printf '  rename ... '
@@ -275,29 +350,9 @@ for ex in examples/*/; do
   edit_step "$name: physical bones" "$ex" ragdolldemo
   printf 'ok\n'
 
-  # The Tiles tool builds its own map, so it runs on every example.
-  printf '  tiles ...  '
-  edit_step "$name: tiles" "$ex" tilesdemo
-  printf 'ok\n'
 
-  # The showcase seam: a scripted sequence feeds input and drives the
-  # editor; ninety frames of it is enough to fail on a broken call.
-  printf '  show ...   '
-  edit_step "$name: showcase" "$ex" "show:input,input"
-  printf 'ok\n'
 
-  # The editor plugin seam, from editor/plugins/counter.rn: a dock tab, a
-  # window, a palette command, an inspector section and this state itself.
-  printf '  plugin ... '
-  edit_step "$name: plugin" "$ex" counterdemo
-  printf 'ok\n'
 
-  # Copy and paste, which the shell drives from a clipboard event no headless
-  # run can raise, and the Assets dock's three filesystem verbs.
-  printf '  clip ...   '
-  edit_step "$name: clipboard" "$ex" clipdemo
-  edit_step "$name: script paths" "$ex" scriptdemo
-  printf 'ok\n'
   printf '  assets ... '
   edit_step "$name: assets" "$ex" assetdemo
   printf 'ok\n'
@@ -328,19 +383,8 @@ for ex in examples/*/; do
   edit_step "$name: placing" "$ex" placedemo
   printf 'ok\n'
 
-  # The profiler's data path: every stage named, the frame covering them.
-  printf '  timings ...'
-  edit_step "$name: timings" "$ex" timingsdemo
-  printf 'ok\n'
 
-  printf '  session ...'
-  edit_step "$name: session" "$ex" sessiondemo
-  printf 'ok\n'
 
-  # The theme switch, both ways: light and back to dark.
-  printf '  theme ...  '
-  edit_step "$name: theme" "$ex" themedemo
-  printf 'ok\n'
 
   # The selection set: extending it, aligning two nodes, undoing that,
   # grouping, and the lock and hide that skip the gizmo.
@@ -348,27 +392,14 @@ for ex in examples/*/; do
   edit_step "$name: selection" "$ex" seldemo
   printf 'ok\n'
 
-  # Drag-in, one case per extension, and the file a drop copies in.
-  printf '  drop ...   '
-  edit_step "$name: drag-in" "$ex" dropdemo
-  printf 'ok\n'
 
-  # The Events view: a row added and undone, and the Rune it writes.
-  printf '  events ... '
-  edit_step "$name: events" "$ex" eventsdemo
-  printf 'ok\n'
 
-  # The library: a material copied in and pointed at the selection.
-  printf '  library ...'
-  edit_step "$name: library" "$ex" librarydemo
-  edit_step "$name: rows" "$ex" rowsdemo
-  printf 'ok\n'
 
-  # The Pen: anchors, a handle, the loop closed, and the asset it writes.
-  printf '  pen ...    '
-  edit_step "$name: pen" "$ex" pendemo
-  printf 'ok\n'
 done
+
+if [ "$gpu" = 1 ] && [ -n "${states_on:-}" ]; then
+  editor_states "$states_on"
+fi
 
 printf '\npack digests (compared across platforms in CI):\n'
 cat "$digests"
