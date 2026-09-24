@@ -29,12 +29,7 @@ cases.push({ name: 'editor', start: `start_editor('c', '/editor.bpak', '/hello.b
 const page = (start) => `<!doctype html><html><head><link rel="icon" href="data:,"></head>
 <body style="margin:0"><canvas id="c" style="display:block;width:960px;height:540px"></canvas>
 <script type="module">
-let gpu = null;
-for (let i = 0; i < 20 && !gpu; i++) {
-  gpu = navigator.gpu ? await navigator.gpu.requestAdapter().catch(() => null) : null;
-  if (!gpu) await new Promise((r) => setTimeout(r, 250));
-}
-if (!gpu) console.error('smoke: no WebGPU adapter');
+if (!navigator.gpu || !(await navigator.gpu.requestAdapter())) console.error('smoke: no WebGPU adapter');
 const mod = await import('/balaur.js');
 await mod.default({ module_or_path: '/balaur_bg.wasm' });
 mod.${start}.catch((e) => console.error('smoke: start failed', e));
