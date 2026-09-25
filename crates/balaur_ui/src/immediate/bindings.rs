@@ -17,11 +17,13 @@ use crate::{UiConfig, UiState};
 
 /// `ui.*` bindings: theme.
 pub(crate) fn install_theme(m: &mut dyn Bindings<Engine>) {
-    m.describe(&[(
-        "set_theme",
-        &[],
-        "", "Replace the theme: `name = \"#rrggbb\"` colour tokens, `dark = true|false`, and a `roles` table of named looks a widget takes with `role:`.",
-    )]);
+    m.describe(&[
+        (
+            "set_theme",
+            &[],
+            "", "Replace the theme: `name = \"#rrggbb\"` colour tokens, `dark = true|false`, and a `roles` table of named looks a widget takes with `role:`.",
+        ),
+    ]);
     {
         // No reader by design (N8): `UiConfig::theme` already holds every
         // token the caller wrote, and scripts keep their own palette table;
@@ -984,8 +986,12 @@ fn install_clipboard_and_color(m: &mut dyn Bindings<Engine>) {
     m.function("wants_keyboard", |_eng: &Engine, ()| {
         with_ctx(|ctx| Ok(ctx.egui_wants_keyboard_input()))
     });
-    m.function("wants_pointer", |_eng: &Engine, ()| {
-        with_ctx(|ctx| Ok(ctx.egui_wants_pointer_input()))
+    m.function("wants_pointer", |eng: &Engine, ()| {
+        let found = eng
+            .try_resource::<crate::widget::node::UiPointer>()
+            .map(|p| *p.borrow())
+            .unwrap_or_default();
+        with_ctx(|ctx| Ok(found.wants(ctx.egui_wants_pointer_input())))
     });
 }
 
@@ -1144,7 +1150,7 @@ fn install_drag_value(m: &mut dyn Bindings<Engine>) {
                 let size = opts.px(k::SIZE, 12.0);
                 let mut x = rect.min.x + 5.0;
                 if let Some(prefix) = opts.string(k::PREFIX) {
-                    let color = opts.color(k::PREFIX_COLOR, Color32::from_rgb(0xf0, 0xa2, 0x73));
+                    let color = opts.color(k::PREFIX_COLOR, Color32::from_rgb(0x6f, 0xa4, 0xd8));
                     let galley = ui.painter().layout_no_wrap(
                         prefix,
                         FontId::new(size, theme::family(w::HEADING)),

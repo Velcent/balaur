@@ -63,6 +63,7 @@ being built, marked `done`, never back in the shipped one.
 | **Semantic tokens, inlay hints and code actions** — colouring from the compiler, inferred types shown inline, and a quick fix on a diagnostic, held until the gaps in completion are known. | 0.3 | no plan |
 | **Focused script editing** — the code pane takes the whole window beside its hooks list, with the docks folded away and put back as they were. | 0.2 done | [PLAN-editor-redesign.md#57-focus-for-a-script](PLAN-editor-redesign.md#57-focus-for-a-script) |
 | **Project manager** — the screen the editor starts on: recent projects, new from a template, open a folder, Godot import. | 0.2 done | [PLAN-project-manager.md](PLAN-project-manager.md) |
+| **Editor themes** — themes a person owns beside the two bundled, a copy that states only what it changes, and a window that edits every role. | 0.2 done | [PLAN-editor-themes.md](PLAN-editor-themes.md) |
 | **An import that does not stop the editor** — a job that writes a few files a frame, a list of what is importing, and an Import button. | 0.2 done | [PLAN-import-jobs.md](PLAN-import-jobs.md) |
 | **The User data dock** — the files a game keeps for its player, saves and prefs among them, opened as trees and edited in place. | 0.2 done | [PLAN-gamend.md#2b-the-gamend-dock-the-server-target-and-logs](PLAN-gamend.md#2b-the-gamend-dock-the-server-target-and-logs) |
 | **Curve editor and onion skin** — tangent handles on keys, and ghosted neighbouring frames in the timeline. | 0.3 | [PLAN-editor.md#curve-editor-and-onion-skin](PLAN-editor.md#curve-editor-and-onion-skin) |
@@ -88,6 +89,7 @@ being built, marked `done`, never back in the shipped one.
 | **Scenes, assets and packs** — prefabs with per-path overrides, `id://` references that survive a rename, import settings beside each file, and sha256-verified binary packs. | 0.1 done | no plan |
 | **A bad call caught before it runs** — `balaur check` reads the scene beside the script and resolves a component's method against the table the run time uses. | 0.2 done | [PLAN-script-analysis.md](PLAN-script-analysis.md) |
 | **Addons as modules** — a file directly under `addons/<name>/` is `<name>::<file>` in every script, its functions and constants reached by path, in `balaur_script_rune`. | 0.2 done | no plan |
+| **Regular expressions** — a `regex` module over `regex-lite`: `search`, `search_all`, `replace`, `split` and `escape`, with a match as a table. | 0.2 done | [PLAN-polyglot-port.md](PLAN-polyglot-port.md) |
 | **FBX import** — `balaur import` over the `ufbx` crate, for the meshes, rigs and clips that never ship as glTF. | 0.7 | no plan |
 | **Godot import** — `balaur import` over `project.godot`, `.tscn`, `.tres` and `.gdshader`, writing scenes, assets, script bodies and a report naming what did not convert. | 0.2 done | [PLAN-godot-import.md](PLAN-godot-import.md) |
 | **Asset streaming** — a load that runs off the tick, a scene added to one already running, and an asset dropped when nothing names it. | 0.6 | no plan |
@@ -127,6 +129,7 @@ being built, marked `done`, never back in the shipped one.
 | Item | Milestone | Plan |
 | --- | :-: | --- |
 | **Interactivity without a script** — hooks, states, scene variables and the binding rows the Events view authors over them, so a scene reacts with no `.rn` beside it. | 0.1 done | no plan |
+| **An event a script can finish** — a hook that answers `true` stops the broadcast, and a press reaches the node under the pointer and then every other node. | 0.2 done | [PLAN-interactivity.md](PLAN-interactivity.md) |
 | **Navigation** — a `navmesh` asset, paths over it, and `agent2d` and `agent3d` with avoidance, all on the fixed step and in the digest. | 0.5 | [PLAN-navigation.md](PLAN-navigation.md) |
 | **Voice in a match** — capture, Opus, a jitter buffer, push-to-talk, echo cancellation and positional voice, never entering the simulation or the digest. | 0.5 | [PLAN-voice.md](PLAN-voice.md) |
 | **Motion and haptics beyond one pad** — Switch Pro and Joy-Con gyro, sensor calibration, adaptive triggers, waveform haptics, device motion, and pads on iOS and Android. | 0.8 | [PLAN-input.md](PLAN-input.md) |
@@ -144,6 +147,8 @@ being built, marked `done`, never back in the shipped one.
 | **Lists, trees and tables** — `list`, `tree` and `table` kinds with many rows selected, columns a drag resizes, and only the rows in view built. | 0.2 done | [PLAN-widgets.md#data-views](PLAN-widgets.md#data-views) |
 | **Menus, popups and tooltips** — a menu bar with submenus, a context menu a right click or a long press opens, shortcuts on rows, and a toast. | 0.2 done | [PLAN-widgets.md#menus-and-popups](PLAN-widgets.md#menus-and-popups) |
 | **Text a game can edit** — a `text_area`, a `code` kind with the editor's gutter, a `drag_value` with arrows and units, labels a drag selects, and `[url]` and `[hint]` marks. | 0.2 done | [PLAN-widgets.md#text](PLAN-widgets.md#text) |
+| **Theme states and icons** — `disabled` and `focus` tables in a `widget_theme`, and the icons a check, a spin box, a tab and a slider draw. | 0.3 | [PLAN-polyglot-port.md](PLAN-polyglot-port.md) |
+| **Pointer shape and pass-through** — a widget's `cursor` names the pointer over it, and `pointer_through` keeps `ui.wants_pointer()` false there. | 0.2 done | [PLAN-polyglot-port.md](PLAN-polyglot-port.md) |
 | **Aspect and camera containers** — an `aspect` box that holds a ratio, and a camera's texture drawn as a widget the layout sizes. | 0.3 | [PLAN-widgets.md#containers](PLAN-widgets.md#containers) |
 | **A graph canvas** — a `graph` kind of nodes, ports and links a drag connects, with pan and zoom, under both the Rune graph and the shader graph. | 0.5 | [PLAN-widgets.md#containers](PLAN-widgets.md#containers) |
 | **Pickers, and drag and drop** — a colour wheel and a file chooser as widget kinds, with a payload one widget offers and another takes. | 0.5 | [PLAN-widgets.md#pickers-and-drag](PLAN-widgets.md#pickers-and-drag) |
@@ -163,6 +168,7 @@ can do today, in the batches it would be built in.
 | **The 3D look** — image-based lighting and SSAO bound, glTF keeping its factors and maps, glass, mirrors, probes, finishing passes and layer stacks. | 0.2 done | [PLAN-3d-rendering.md](PLAN-3d-rendering.md) |
 | **A rendered still** — the fork's path tracer behind the editor's Export sheet, with a sample count and a denoise toggle. | 0.3 | [PLAN-3d-rendering.md](PLAN-3d-rendering.md) |
 | **Decals and volumetric fog** — a `decal` component projected onto the depth buffer, and fog a light throws shafts through. | 0.4 | [PLAN-3d-rendering.md](PLAN-3d-rendering.md) |
+| **Immediate shapes in the draw order** — `z` and a texture `region` on `render.draw_*_2d`, so a script's own drawing sits among the sprites rather than over them. | 0.3 | [PLAN-polyglot-port.md](PLAN-polyglot-port.md) |
 | **Lit normal-mapped sprites** — 2D lights and shadows are built, and the normal map is what is left. | 0.3 | [PLAN-rendering.md](PLAN-rendering.md) |
 | **Particles in 3D** — `particles3d`, and in both dimensions: emission shapes, attractors, colliders, trails, sub-emitters, lit particles and a compute stepper. | 0.3 | [PLAN-particles.md](PLAN-particles.md) |
 | **2D batching** — `balaur_render` draws the sprites and shapes that share a texture and a material in one call rather than one each. | 0.2 done | [PLAN-views-and-culling.md](PLAN-views-and-culling.md) |

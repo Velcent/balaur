@@ -313,6 +313,8 @@ fn super_reaches_the_base_copy_of_an_overridden_function() {
         defaulted: BTreeMap::default(),
         methods: BTreeMap::default(),
         signal_arity: BTreeMap::default(),
+        members: std::collections::BTreeSet::default(),
+        autoload_nodes: std::collections::BTreeSet::default(),
     };
     let source = "extends Fish\n\nfunc swim(speed):\n\treturn super(speed) * 2\n";
     let out = convert(source, "scripts/shark.gd", &classes);
@@ -414,7 +416,7 @@ func push(other):\n\
 \tvelocity.y += 1\n";
     let out = convert(source, "scripts/a.gd", &Classes::default());
     for expected in [
-        r#"(gd.set_field)(v, "x", 3)"#,
+        r#"v = (gd.with_field)(v, "x", 3);"#,
         r#"(gd.set_field)(this.velocity, "y", (gd.field)(this.velocity, "y") + 1)"#,
     ] {
         assert!(out.rune.contains(expected), "{expected}\n{}", out.rune);
@@ -628,4 +630,342 @@ func make():\n\
     );
     let out = convert(source, "scripts/r.gd", &Classes::default());
     assert!(out.rune.contains("scripts/r__Tracker.rn"), "{}", out.rune);
+}
+
+#[test]
+fn an_inner_class_sees_the_outers_constants_and_its_siblings() {
+    let source = "extends RefCounted\n\
+enum PB_ERR { NO_ERRORS = 0, TRUNCATED = 1 }\n\
+const LIMIT = 9\n\
+class Field:\n\
+\tvar state := 0\n\
+class Packer:\n\
+\tconst LIMIT = 3\n\
+\tstatic func check(value):\n\
+\t\tvar field = Field.new()\n\
+\t\treturn value == PB_ERR.NO_ERRORS and field.state < LIMIT\n";
+    let inners = super::inner_scripts(source, "proto/pb.gd");
+    assert_eq!(inners.len(), 2);
+    let packer = &inners[1].1;
+    assert!(
+        packer.contains("const Field = preload(\"res://proto/pb__Field.gd\")"),
+        "{packer}"
+    );
+    assert!(
+        packer.contains("enum PB_ERR { NO_ERRORS = 0, TRUNCATED = 1 }"),
+        "{packer}"
+    );
+    assert_eq!(packer.matches("const LIMIT").count(), 1, "{packer}");
+    let out = convert(packer, "proto/pb__Packer.gd", &Classes::default());
+    assert!(
+        out.rune
+            .contains(r#"pub const PB_ERR = #{ "NO_ERRORS": 0, "TRUNCATED": 1 };"#),
+        "{}",
+        out.rune
+    );
+    assert!(out.rune.contains("pub const LIMIT = 3;"), "{}", out.rune);
+    assert!(out.rune.contains("proto/pb__Field.rn"), "{}", out.rune);
+    assert!(!out.rune.contains("gd.todo"), "{}", out.rune);
+}
+
+#[test]
+fn an_inner_class_is_reached_through_a_preload_of_its_file() {
+    let mut classes = Classes::default();
+    classes.inner.insert(
+        "proto/pb.rn.Field".to_string(),
+        "proto/pb__Field.gd".to_string(),
+    );
+    let source = "extends Node\n\
+const PB = preload(\"res://proto/pb.gd\")\n\
+func make():\n\
+\treturn PB.Field.new()\n";
+    let out = convert(source, "scripts/u.gd", &classes);
+    assert!(
+        out.rune
+            .contains(r#"script::require("proto/pb__Field.rn").new"#),
+        "{}",
+        out.rune
+    );
+    assert!(!out.rune.contains("gd.invoke"), "{}", out.rune);
+}
+
+#[test]
+fn a_class_inside_an_inner_class_is_reached_from_inside_and_outside() {
+    let source = "extends RefCounted\n\
+class Msg:\n\
+\tclass Part:\n\
+\t\tvar n := 0\n\
+\tfunc make():\n\
+\t\treturn Msg.Part.new()\n";
+    let inners = super::inner_scripts(source, "proto/pb.gd");
+    let msg = &inners[0].1;
+    assert!(
+        msg.starts_with("extends RefCounted\nclass_name Msg\n"),
+        "{msg}"
+    );
+    let nested = super::inner_scripts(msg, "proto/pb__Msg.gd");
+    assert_eq!(nested[0].0, "Part");
+    let mut classes = Classes::default();
+    classes
+        .inner
+        .insert("proto/pb.rn.Msg".into(), "proto/pb__Msg.gd".into());
+    classes.inner.insert(
+        "proto/pb__Msg.rn.Part".into(),
+        "proto/pb__Msg__Part.gd".into(),
+    );
+    let part = r#"script::require("proto/pb__Msg__Part.rn").new"#;
+    let out = convert(msg, "proto/pb__Msg.gd", &classes);
+    assert!(out.rune.contains(part), "{}", out.rune);
+    let user = "extends Node\n\
+const PB = preload(\"res://proto/pb.gd\")\n\
+func make():\n\
+\treturn PB.Msg.Part.new()\n";
+    let out = convert(user, "scripts/u.gd", &classes);
+    assert!(out.rune.contains(part), "{}", out.rune);
+}
+
+#[test]
+fn a_hex_colour_at_the_top_level_hides_none_of_the_declarations_below_it() {
+    let source = "extends Node\n\
+var tint: Color = Color(\"#ff8a7a\")\n\
+var found := false\n\
+func mark():\n\
+\tfound = true\n";
+    let out = convert(source, "scripts/cell.gd", &Classes::default());
+    assert!(out.rune.contains("this.found = true;"), "{}", out.rune);
+    assert!(!out.rune.contains("gd.todo"), "{}", out.rune);
+}
+
+#[test]
+fn another_nodes_method_handed_to_connect_is_bound_rather_than_called() {
+    let source = "extends Node\n\
+signal changed\n\
+var bar\n\
+var server\n\
+func _ready():\n\
+\tchanged.connect(bar.refresh)\n\
+\tserver.done.connect(bar.refresh)\n";
+    let out = convert(source, "scripts/lobby.gd", &Classes::default());
+    let bound = r#"#{ "__bound": this.bar, "__method": "refresh" }"#;
+    assert_eq!(out.rune.matches(bound).count(), 2, "{}", out.rune);
+    assert!(
+        !out.rune.contains(r#"(gd.field)(this.bar, "refresh")"#),
+        "{}",
+        out.rune
+    );
+}
+
+#[test]
+fn an_own_handler_of_a_foreign_signal_takes_its_own_arguments() {
+    let source = "extends Node\n\
+var machine\n\
+func _ready():\n\
+\tmachine.state_changed.connect(_on_state)\n\
+func _on_state(old, new):\n\
+\tpass\n";
+    let out = convert(source, "scripts/flow.gd", &Classes::default());
+    let record = r#"#{ "__call": { |arg0, arg1| { _on_state(this, arg0, arg1) } }, "__takes": 2 }"#;
+    assert!(out.rune.contains(record), "{}", out.rune);
+}
+
+#[test]
+fn an_input_handler_hangs_off_the_engines_hooks_and_answers_handled() {
+    let source = "extends Control\n\
+func _input(event: InputEvent) -> void:\n\
+\tif event.is_action_pressed(\"ui_cancel\"):\n\
+\t\tget_viewport().set_input_as_handled()\n\
+func _unhandled_input(event):\n\
+\tset_process_input(false)\n";
+    let out = convert(source, "scripts/popup.gd", &Classes::default());
+    for want in [
+        "pub fn on_key_down(this, key) {",
+        "let event = (gd.key_event)(key, true);",
+        r#"let _ = (gd.invoke1)(this.node, "_input", event);"#,
+        "if !(gd.input_handled)() && !ui::wants_keyboard() {",
+        "pub fn on_pointer_down(this, button) {",
+        "!ui::wants_pointer()",
+        "return (gd.take_input_handled)();",
+        "(gd.set_input_handled)()",
+        "this.input_enabled = false;",
+    ] {
+        assert!(out.rune.contains(want), "no `{want}` in:\n{}", out.rune);
+    }
+    assert_eq!(out.rune.matches("pub fn on_").count(), 6, "{}", out.rune);
+}
+
+#[test]
+fn a_class_that_draws_draws_every_frame_through_the_shim() {
+    let pips = [
+        "extends Node2D",
+        "var count := 3",
+        "func _draw() -> void:",
+        "\tfor i in count:",
+        "\t\tdraw_circle(Vector2(i * 12, 0), 4.0, Color.RED)",
+        "func set_count(n):",
+        "\tcount = n",
+        "\tqueue_redraw()",
+        "",
+    ]
+    .join("\n");
+    let out = convert(&pips, "scripts/pips.gd", &Classes::default());
+    for want in [
+        "pub fn update(this, dt) {\n    let _ = (script::require(\"gd.rn\").draw_frame)(this.node);\n}",
+        "(gd.draw_circle)(this.node, (gd.vec2)(i * 12, 0), 4.0, (gd.color)(1.0, 0.0, 0.0, 1.0), (), (), ())",
+    ] {
+        assert!(out.rune.contains(want), "no `{want}` in:\n{}", out.rune);
+    }
+    assert!(
+        out.rune.contains("(gd.queue_redraw)(this.node)"),
+        "{}",
+        out.rune
+    );
+    assert!(!out.rune.contains("gd.todo"), "{}", out.rune);
+    let lines = [
+        "extends Node2D",
+        "func _process(delta):",
+        "\tpass",
+        "func _draw():",
+        "\tdraw_line(Vector2.ZERO, Vector2(1, 1), Color.WHITE, 2.0)",
+        "",
+    ]
+    .join("\n");
+    let out = convert(&lines, "scripts/lines.gd", &Classes::default());
+    assert!(
+        out.rune.contains(
+            "pub fn update(this, delta) {\n    let _ = (script::require(\"gd.rn\").draw_frame)(this.node);"
+        ),
+        "{}",
+        out.rune
+    );
+    assert_eq!(
+        out.rune.matches("pub fn update(").count(),
+        1,
+        "{}",
+        out.rune
+    );
+}
+
+#[test]
+fn a_widget_signal_with_a_bound_handler_goes_through_a_forwarder() {
+    let source = "extends Control\n\
+var btn\n\
+func _ready():\n\
+\tbtn.pressed.connect(_on_letter.bind(\"a\"))\n\
+func _on_letter(letter):\n\
+\tpass\n";
+    let out = convert(source, "scripts/pad.gd", &Classes::default());
+    assert!(
+        out.rune.contains(r#"(gd.widget_bind)(this.btn, "on_click", #{ "__call": { let tmp1 = "a"; || { _on_letter(this, tmp1) } }, "__takes": 0 })"#),
+        "{}",
+        out.rune
+    );
+    assert!(
+        out.rune.contains("pub fn __widget_on_click(this, node) {\n    let _ = (script::require(\"gd.rn\").widget_fire)(node, \"on_click\", []);\n}"),
+        "{}",
+        out.rune
+    );
+}
+
+#[test]
+fn a_callable_held_in_a_variable_connects_as_a_value() {
+    let source = "extends Node\n\
+var popup\n\
+var on_closed: Callable\n\
+func _ready():\n\
+\tpopup.closed.connect(on_closed)\n";
+    let out = convert(source, "scripts/intro.gd", &Classes::default());
+    assert!(
+        out.rune
+            .contains(r#"(gd.connect)(this.popup, "closed", this.on_closed)"#),
+        "{}",
+        out.rune
+    );
+}
+
+#[test]
+fn a_string_parameter_indexes_by_character() {
+    let source = "extends Node\n\
+var title: String = \"\"\n\
+static func shown(alphabet: String, letters: Array) -> String:\n\
+\treturn alphabet[0] + letters[0]\n\
+func first():\n\
+\treturn title[0]\n\
+func label(state: String):\n\
+\treturn state[1]\n\
+func save(state):\n\
+\tstate[\"packet\"] = 1\n\
+\tstate[2] = 3\n";
+    let out = convert(source, "scripts/words.gd", &Classes::default());
+    assert!(out.rune.contains("(gd.at)(alphabet, 0)"), "{}", out.rune);
+    assert!(out.rune.contains("letters[0]"), "{}", out.rune);
+    assert!(out.rune.contains("(gd.at)(this.title, 0)"), "{}", out.rune);
+    assert!(out.rune.contains("(gd.at)(state, 1)"), "{}", out.rune);
+    assert!(out.rune.contains("state[\"packet\"] = 1;"), "{}", out.rune);
+    assert!(out.rune.contains("state[2] = 3;"), "{}", out.rune);
+}
+
+#[test]
+fn a_cursor_shape_set_on_a_control_names_the_widget_s_cursor() {
+    let source = "extends Control\n\
+@onready var name_label = $Name\n\
+func _ready():\n\
+\tname_label.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND\n";
+    let out = convert(source, "scripts/entry.gd", &Classes::default());
+    assert!(
+        out.rune
+            .contains("patch_component(\"widget\", #{ \"cursor\": (gd.cursor_word)(2) })"),
+        "{}",
+        out.rune
+    );
+}
+
+#[test]
+fn every_cursor_shape_constant_keeps_its_number_under_both_spellings() {
+    let source = "extends Control\n\
+func _ready():\n\
+\tmouse_default_cursor_shape = Control.CURSOR_VSPLIT\n\
+\tmouse_default_cursor_shape = CursorShape.CURSOR_HELP\n";
+    let out = convert(source, "scripts/seam.gd", &Classes::default());
+    assert!(out.rune.contains("(gd.cursor_word)(14)"), "{}", out.rune);
+    assert!(out.rune.contains("(gd.cursor_word)(16)"), "{}", out.rune);
+}
+
+#[test]
+fn a_mouse_filter_set_from_a_script_says_whether_the_pointer_passes() {
+    let source = "extends Control\n\
+func _ready():\n\
+\tmouse_filter = Control.MOUSE_FILTER_IGNORE\n";
+    let out = convert(source, "scripts/veil.gd", &Classes::default());
+    assert!(
+        out.rune
+            .contains("patch_component(\"widget\", #{ \"pointer_through\": 2 == 2 })"),
+        "{}",
+        out.rune
+    );
+}
+
+#[test]
+fn a_constant_holding_a_triple_quoted_string_over_lines_is_one_declaration() {
+    let source = [
+        "extends Node",
+        "class Plugin:",
+        "\tconst HEADER: String = \"\"\"<?xml version=\"1.0\"?>",
+        "\t<plist version=\"1.0\">",
+        "\t<array>\\n\"\"\"",
+        "\tconst SUFFIX: String = \".ipa\"",
+        "\tfunc write(file):",
+        "\t\tfile.store_string(HEADER + SUFFIX)",
+        "",
+    ]
+    .join("\n");
+    let inner = super::inner_scripts(&source, "addons/deeplink.gd");
+    let (path, text) = inner
+        .iter()
+        .find(|(path, _)| path.contains("Plugin"))
+        .expect("the inner class's file");
+    let rune = convert(text, path, &Classes::default()).rune;
+    assert!(rune.contains("pub const HEADER = "), "{rune}");
+    assert!(rune.contains("<plist version="), "{rune}");
+    assert!(rune.contains("pub const SUFFIX = \".ipa\";"), "{rune}");
+    assert!(!rune.contains("PORT("), "{rune}");
 }

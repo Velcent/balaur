@@ -89,4 +89,139 @@ mod tests {
             "the probe hid itself only if the shim compiled and did the sums"
         );
     }
+
+    /// Godot's `AnimationPlayer` verbs reach the `animation` component: a clip
+    /// the library holds is found and plays, and one it does not is not found.
+    #[test]
+    fn an_animation_player_s_verbs_drive_the_animation_component() {
+        let dir = tempfile::tempdir().unwrap();
+        let put = |path: &str, text: &str| std::fs::write(dir.path().join(path), text).unwrap();
+        put(
+            "project.toml",
+            "[application]\nname = \"shim\"\nmain_scene = \"main.toml\"\n",
+        );
+        std::fs::create_dir_all(dir.path().join("animations")).unwrap();
+        put(
+            "animations/steal.toml",
+            &[
+                "type = \"animation_clip\"",
+                "[clips.start]",
+                "length = 2.0",
+                "[[clips.start.tracks]]",
+                "target = \"\"",
+                "property = \"position\"",
+                "interp = \"linear\"",
+                "keys = [{ t = 0.0, value = [0.0, 0.0, 0.0] }, { t = 2.0, value = [1.0, 0.0, 0.0] }]",
+                "",
+            ]
+            .join("\n"),
+        );
+        put(
+            "main.toml",
+            &[
+                "[[nodes]]",
+                "id = \"probe\"",
+                "name = \"Probe\"",
+                "script = { source = \"probe.rn\" }",
+                "animation = { library = \"animations/steal.toml\" }",
+                "",
+            ]
+            .join("\n"),
+        );
+        put("gd.rn", super::SHIM);
+        put(
+            "probe.rn",
+            &[
+                "pub fn init(this) {",
+                "    let gd = script::require(\"gd.rn\");",
+                "    let has = (gd.invoke1)(this.node, \"has_animation\", \"start\");",
+                "    let lacks = (gd.invoke1)(this.node, \"has_animation\", \"end\");",
+                "    (gd.invoke1)(this.node, \"play\", \"start\");",
+                "    (gd.set_field)(this.node, \"speed_scale\", 4.0);",
+                "    let playing = (gd.invoke)(this.node, \"is_playing\");",
+                "    let current = (gd.invoke)(this.node, \"get_current_animation\");",
+                "    let speed = (gd.field)(this.node, \"speed_scale\");",
+                "    if has && !lacks && playing && current == \"start\" && speed == 4.0 {",
+                "        this.node.set_z_index(7);",
+                "    }",
+                "}",
+                "",
+            ]
+            .join("\n"),
+        );
+        let mut config = balaur::AppConfig::dev(dir.path().to_string_lossy().as_ref());
+        config.watch = false;
+        let mut app = balaur::standard_app(config).unwrap();
+        app.load_project().unwrap();
+        app.tick(1.0 / 60.0);
+        let world = app.engine.world();
+        let probe = balaur_core::scene::find_node(&world, app.engine.root(), "Probe").unwrap();
+        assert_eq!(
+            world
+                .get::<&balaur_core::scene::Appearance>(probe)
+                .unwrap()
+                .z_index,
+            7,
+            "the probe marked itself only if every verb answered as Godot's player"
+        );
+    }
+
+    /// A multimesh is its node's listed cloner over one `polygon` child: each
+    /// instance a copy, placed from a transform a script built axis by axis.
+    #[test]
+    fn a_multimesh_instance_is_a_listed_copy_where_its_transform_puts_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let put = |path: &str, text: &str| std::fs::write(dir.path().join(path), text).unwrap();
+        put(
+            "project.toml",
+            "[application]\nname = \"shim\"\nmain_scene = \"main.toml\"\n",
+        );
+        put(
+            "main.toml",
+            "[[nodes]]\nid = \"probe\"\nname = \"Probe\"\nscript = { source = \"probe.rn\" }\n",
+        );
+        put("gd.rn", super::SHIM);
+        put(
+            "probe.rn",
+            &[
+                "pub fn init(this) {",
+                "    let gd = script::require(\"gd.rn\");",
+                "    let mesh = (gd.array_mesh)();",
+                "    let tri = [(gd.vec3)(0.0, 0.0, 0.0), (gd.vec3)(100.0, 0.0, 0.0), (gd.vec3)(0.0, 100.0, 0.0)];",
+                "    (mesh[\"add_surface_from_arrays\"])(3, [tri]);",
+                "    let mm = (gd.multimesh)();",
+                "    (gd.set_field)(mm, \"mesh\", mesh);",
+                "    (gd.set_field)(this.node, \"multimesh\", mm);",
+                "    (gd.set_field)(mm, \"instance_count\", 2);",
+                "    let t = (gd.transform2d)([]);",
+                "    t = (gd.with_field)(t, \"x\", (gd.vec2)(2.0, 0.0));",
+                "    t = (gd.with_field)(t, \"origin\", (gd.vec2)(300.0, 0.0));",
+                "    (mm[\"set_instance_transform_2d\"])(1, t);",
+                "    (mm[\"set_instance_color\"])(1, (gd.color)(1.0, 0.0, 0.0, 0.5));",
+                "    let copies = this.node.get_component(\"cloner\")[\"copies\"];",
+                "    let copy = copies[1];",
+                "    let polygon = this.node.get_node(\"mesh\").has_component(\"polygon\");",
+                "    if polygon && copies.len() == 2 && copy[\"position\"][0] == 3.0 && copy[\"scale\"][0] == 2.0 && copy[\"tint\"][3] == 0.5 {",
+                "        this.node.set_visible(false);",
+                "    }",
+                "}",
+                "",
+            ]
+            .join("\n"),
+        );
+        let mut config = balaur::AppConfig::dev(dir.path().to_string_lossy().as_ref());
+        config.watch = false;
+        let mut app = balaur::standard_app(config).unwrap();
+        app.load_project().unwrap();
+        app.tick(1.0 / 60.0);
+        let world = app.engine.world();
+        let probe = balaur_core::scene::find_node(&world, app.engine.root(), "Probe").unwrap();
+        assert!(
+            !world
+                .get::<&balaur_core::scene::Appearance>(probe)
+                .unwrap()
+                .visible,
+            "the probe hid itself only if copy 1 sits at x 3, scaled 2, half see-through"
+        );
+    }
 }

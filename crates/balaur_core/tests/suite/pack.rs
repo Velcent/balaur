@@ -209,6 +209,15 @@ fn a_compile_error_fails_the_build() {
 }
 
 #[test]
+fn every_script_that_fails_to_compile_is_named_not_only_the_first() {
+    let dir = project();
+    std::fs::write(dir.path().join("b.txt"), "second").unwrap();
+    let err = Pack::build(dir.path(), &Failing).unwrap_err().to_string();
+    assert!(err.contains("2 script(s) did not compile"), "{err}");
+    assert!(err.contains("no good: b.txt"), "{err}");
+}
+
+#[test]
 fn a_project_without_a_manifest_is_an_error() {
     let dir = tempfile::tempdir().unwrap();
     assert!(Pack::build(dir.path(), &Reversing).is_err());
@@ -356,6 +365,24 @@ fn a_pack_leaves_out_what_the_project_ignores() {
     assert!(
         !held.iter().any(|path| path.ends_with(".blend1")),
         "nor a file the pattern names: {held:?}"
+    );
+}
+
+#[test]
+fn a_pack_carries_the_json_and_csv_a_game_reads_at_run_time() {
+    let dir = project();
+    std::fs::create_dir_all(dir.path().join("data")).unwrap();
+    std::fs::write(dir.path().join("data/levels.json"), "{\"first\": 1}").unwrap();
+    std::fs::write(dir.path().join("data/words.csv"), "en,ro\nsea,mare\n").unwrap();
+    let pack = Pack::build(dir.path(), &Reversing).unwrap();
+    assert_eq!(
+        pack.assets.get("data/levels.json").map(Vec::as_slice),
+        Some(&b"{\"first\": 1}"[..])
+    );
+    assert!(
+        pack.assets.contains_key("data/words.csv"),
+        "{:?}",
+        pack.assets.keys()
     );
 }
 

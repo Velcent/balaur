@@ -1,9 +1,8 @@
 //! `project.godot` as a `project.toml`.
 //!
 //! What carries across is what both engines have: the name, the main scene,
-//! the window, the locales and the input map. An autoload has no equivalent
-//! here and is reported rather than invented; so is every key neither engine
-//! shares.
+//! the window, the locales and the input map. A script autoload becomes a
+//! node of the main scene; every key neither engine shares is reported.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -26,7 +25,11 @@ pub(crate) struct Converted {
 ///
 /// `uids` resolves `uid://` references to project-relative paths; an empty
 /// map is fine and leaves them reported instead.
-pub(crate) fn convert(document: &Document, uids: &BTreeMap<String, String>) -> Result<Converted> {
+pub(crate) fn convert(
+    document: &Document,
+    uids: &BTreeMap<String, String>,
+    ignore: &[String],
+) -> Result<Converted> {
     let mut notes = Vec::new();
     let mut out = String::new();
     let get = |section: &str, key: &str| {
@@ -59,6 +62,11 @@ pub(crate) fn convert(document: &Document, uids: &BTreeMap<String, String>) -> R
         }
     }
 
+    if !ignore.is_empty() {
+        let patterns: Vec<String> = ignore.iter().map(|p| quote(p)).collect();
+        writeln!(out, "ignore = [{}]", patterns.join(", "))?;
+    }
+
     window(document, &mut out, &mut notes)?;
     if let Some(theme) = get("gui", "theme/custom").as_ref().and_then(Value::as_str) {
         let path = resolve(theme, uids, &mut notes);
@@ -75,10 +83,14 @@ pub(crate) fn convert(document: &Document, uids: &BTreeMap<String, String>) -> R
     actions(document, &mut out, &mut notes)?;
 
     for section in document.each("autoload") {
-        for (key, _) in &section.fields {
-            notes.push(format!(
-                "autoload `{key}`: balaur has no autoload; give the script to a node in a scene loaded first"
-            ));
+        for (key, value) in &section.fields {
+            // A script autoload becomes a node under the main scene's root;
+            // a scene autoload has no node of its own to become.
+            if !value.as_str().is_some_and(crate::godot::exports::is_script) {
+                notes.push(format!(
+                    "autoload `{key}`: a scene autoload has no node here; give it to the main scene"
+                ));
+            }
         }
     }
     Ok(Converted {
@@ -86,6 +98,47 @@ pub(crate) fn convert(document: &Document, uids: &BTreeMap<String, String>) -> R
         settings_module: settings_module(document),
         notes,
     })
+}
+
+/// What every preset in `export_presets.cfg` leaves out, as the patterns of
+/// `application/ignore`: what no build of the game ships. Godot's `*` also
+/// crosses a `/`, and a pattern with no `/` names a file anywhere.
+pub(crate) fn shared_exclusions(presets: &Document) -> Vec<String> {
+    let lists: Vec<Vec<String>> = presets
+        .sections
+        .iter()
+        .filter(|section| {
+            section.kind.starts_with("preset.") && !section.kind.ends_with(".options")
+        })
+        .map(|section| {
+            let filter = section
+                .field("exclude_filter")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            filter
+                .split(',')
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+                .map(|p| p.strip_prefix("res://").unwrap_or(p))
+                .map(|p| {
+                    let pattern = p.replace('*', "**").replace("****", "**");
+                    if pattern.contains('/') {
+                        pattern
+                    } else {
+                        format!("**/{pattern}")
+                    }
+                })
+                .collect()
+        })
+        .collect();
+    let Some((first, rest)) = lists.split_first() else {
+        return Vec::new();
+    };
+    first
+        .iter()
+        .filter(|pattern| rest.iter().all(|list| list.contains(pattern)))
+        .cloned()
+        .collect()
 }
 
 /// Every string, number and bool `project.godot` sets, under Godot's own
@@ -497,7 +550,7 @@ fn uid_of(path: &std::path::Path) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{convert, key_name, pad_button};
+    use super::{convert, key_name, pad_button, shared_exclusions};
     use crate::godot::parse;
     use std::collections::BTreeMap;
 
@@ -541,7 +594,7 @@ locale/translations=PackedStringArray("res://lang/en.en.translation", "res://lan
 
     fn converted() -> super::Converted {
         let document = parse(PROJECT).expect("the project parses");
-        convert(&document, &BTreeMap::new()).expect("it converts")
+        convert(&document, &BTreeMap::new(), &[]).expect("it converts")
     }
 
     #[test]
@@ -584,9 +637,43 @@ locale/translations=PackedStringArray("res://lang/en.en.translation", "res://lan
     }
 
     #[test]
-    fn an_autoload_is_reported_rather_than_invented() {
+    fn a_script_autoload_is_a_node_of_the_main_scene_and_needs_no_note() {
         let notes = converted().notes;
-        assert!(notes.iter().any(|n| n.contains("ThemeEvents")), "{notes:?}");
+        assert!(
+            !notes.iter().any(|n| n.contains("ThemeEvents")),
+            "{notes:?}"
+        );
+    }
+
+    /// Only what every preset leaves out is not the game's: a web build that
+    /// drops its audio packs still ships them to a phone.
+    #[test]
+    fn what_every_export_preset_excludes_is_ignored_and_nothing_else() {
+        let presets = parse(
+            "[preset.0]\n\nname=\"Web\"\nexclude_filter=\"docs/*,packs/audio/*,data/countries/*.json\"\n\n\
+             [preset.0.options]\n\nx=1\n\n\
+             [preset.1]\n\nname=\"iOS\"\nexclude_filter=\"data/countries/*.json, docs/*,notes.txt\"\n",
+        )
+        .expect("the presets parse");
+        let ignore = shared_exclusions(&presets);
+        let document = parse(PROJECT).expect("the project parses");
+        let out = convert(&document, &BTreeMap::new(), &ignore).expect("it converts");
+        let doc: toml::Value = toml::from_str(&out.project_toml).expect("the project is TOML");
+        let patterns: Vec<&str> = doc["application"]["ignore"]
+            .as_array()
+            .expect("an ignore list")
+            .iter()
+            .filter_map(toml::Value::as_str)
+            .collect();
+        assert!(balaur_core::ignore::ignored(
+            &ignore,
+            "data/countries/ro/borders.json"
+        ));
+        assert!(!balaur_core::ignore::ignored(
+            &ignore,
+            "packs/audio/sea.ogg"
+        ));
+        assert_eq!(patterns, ["docs/**", "data/countries/**.json"]);
     }
 
     #[test]

@@ -19,6 +19,12 @@ use class::{
     OBJECT_ROOTS, builtin_root, constructs, init_call, write_constructor, write_default_init,
 };
 use constants::{enum_members, self_contained, write_constants, write_enums};
+use draw::{DRAW_CALL, write_draw_hook};
+pub(crate) use inner::{
+    defaulted, function_names, inner_classes, inner_file, inner_scripts, member_names,
+    signal_arities,
+};
+use input::{write_input_hooks, write_widget_forwarders};
 use members::write_members;
 
 /// A skeleton, and what the port will have to deal with.
@@ -48,6 +54,8 @@ struct Function {
     defaults: Vec<Option<String>>,
     /// The parameters typed `int`, which Godot truncates a float into.
     ints: Vec<String>,
+    /// The parameters typed `String`, which a body may index by character.
+    strings: Vec<String>,
     is_static: bool,
     /// A base's copy of a function this class overrides, emitted under a
     /// suffixed name because `super` calls it.
@@ -156,10 +164,6 @@ pub(crate) fn convert(source: &str, path: &str, classes: &Classes) -> Converted 
     );
     write_accessors(&mut out, &context, &functions);
     write_constructor(&mut out, source, path, classes, &functions, &defaults);
-    if source.contains("_input(") || source.contains("_unhandled_input(") {
-        notes
-            .push("an `_input` handler: read the `input` module from `update` instead".to_string());
-    }
     Converted { rune: out, notes }
 }
 
@@ -195,12 +199,26 @@ fn forwarders(functions: &[Function]) -> Vec<Function> {
 
 /// A file's top-level declarations, one per entry, each joined across the
 /// lines its brackets run over: `const POPUPS := [` carries its whole list.
+/// Whether a script is code alone: static functions, constants and static
+/// variables, with no signal, no instance member and no hook to run.
+pub(crate) fn code_only(source: &str) -> bool {
+    top_level(source).iter().all(|line| {
+        let line = line.trim_start();
+        let line = line
+            .strip_prefix("@onready ")
+            .or_else(|| line.strip_prefix("@export "))
+            .unwrap_or(line);
+        !(line.starts_with("func ") || line.starts_with("var ") || line.starts_with("signal "))
+    })
+}
+
 fn top_level(source: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut open = 0i32;
     let mut pending: Option<String> = None;
-    for line in source.lines() {
-        let code = line.split('#').next().unwrap_or_default();
+    for line in &gdscript::lex::logical_lines(source) {
+        let line = line.as_str();
+        let code = uncommented(line);
         if let Some(text) = pending.as_mut() {
             text.push(' ');
             text.push_str(code.trim());
@@ -229,6 +247,36 @@ fn top_level(source: &str) -> Vec<String> {
 
 /// How far a line opens or closes brackets, ignoring those inside strings.
 #[allow(clippy::match_same_arms)]
+/// The line up to its comment; a `#` inside a string, as in `Color("#ff0")`,
+/// opens no comment.
+fn uncommented(line: &str) -> &str {
+    let mut quote = None;
+    let mut long = false;
+    let mut chars = line.char_indices();
+    while let Some((at, c)) = chars.next() {
+        // A `"""` string holds quotes and newlines of its own.
+        if line[at..].starts_with("\"\"\"") && quote.is_none() {
+            long = !long;
+            chars.nth(1);
+            continue;
+        }
+        if long {
+            continue;
+        }
+        match (quote, c) {
+            (Some(open), c) if c == open => quote = None,
+            (Some(_), '\\') => {
+                chars.next();
+            }
+            (Some(_), _) => {}
+            (None, '"' | '\'') => quote = Some(c),
+            (None, '#') => return &line[..at],
+            _ => {}
+        }
+    }
+    line
+}
+
 fn depth_of(line: &str) -> i32 {
     let mut depth = 0;
     let mut quote = None;
@@ -239,7 +287,6 @@ fn depth_of(line: &str) -> i32 {
             (Some(_), '\\') => {
                 chars.next();
             }
-            (Some(_), _) => {}
             (None, '"' | '\'') => quote = Some(c),
             (None, '(' | '[' | '{') => depth += 1,
             (None, ')' | ']' | '}') => depth -= 1,
@@ -292,6 +339,32 @@ fn split_functions(source: &str) -> Vec<Function> {
 
 /// Everything a bare name in a body needs to resolve against, this file's and
 /// its bases'.
+/// What one file of the class chain declares, folded into the context.
+fn absorb(context: &mut Context, text: &str) {
+    bool_members(context, text);
+    string_members(context, text);
+    let level = declarations(text);
+    context.members.extend(level.members);
+    context.consts.extend(level.consts);
+    context.lazy.extend(level.lazy);
+    for (name, default) in level.static_vars {
+        context.static_vars.entry(name).or_insert(default);
+    }
+    context.signals.extend(level.signals);
+    context.signal_arity.extend(level.signal_arity);
+    context.methods.extend(level.methods);
+    context.statics.extend(level.statics);
+    // `const Flows = preload("res://flows.gd")` names a class as surely
+    // as its `class_name` does: `Flows.new()` reaches that module.
+    for line in top_level(text) {
+        if let Some((name, module)) = preloaded_script(&line) {
+            context.lazy.remove(&name);
+            context.consts.remove(&name);
+            context.classes.entry(name).or_insert(module);
+        }
+    }
+}
+
 fn context(
     source: &str,
     path: &str,
@@ -344,7 +417,23 @@ fn context(
             .classes
             .insert(name.clone(), inner_file(path, &name).replace(".gd", ".rn"));
     }
+    // The class's own name reaches its own module, which is how an inner
+    // class, indexed under no `class_name` on disk, names what is inside it.
+    if let Some(own) = source
+        .lines()
+        .find_map(|line| line.strip_prefix("class_name "))
+    {
+        let own = name_of(own);
+        if !own.is_empty() {
+            context
+                .classes
+                .entry(own)
+                .or_insert_with(|| path.replace(".gd", ".rn"));
+        }
+    }
     context.defaulted = classes.defaulted.clone();
+    context.project_members.clone_from(&classes.members);
+    context.autoload_nodes.clone_from(&classes.autoload_nodes);
     context.inner = classes
         .inner
         .iter()
@@ -360,28 +449,9 @@ fn context(
         context.signal_arity.insert(signal.clone(), *takes);
     }
     collect_bools(&mut context, functions);
+    collect_strings(&mut context, functions);
     for text in chain(source, classes) {
-        bool_members(&mut context, &text);
-        let level = declarations(&text);
-        context.members.extend(level.members);
-        context.consts.extend(level.consts);
-        context.lazy.extend(level.lazy);
-        for (name, default) in level.static_vars {
-            context.static_vars.entry(name).or_insert(default);
-        }
-        context.signals.extend(level.signals);
-        context.signal_arity.extend(level.signal_arity);
-        context.methods.extend(level.methods);
-        context.statics.extend(level.statics);
-        // `const Flows = preload("res://flows.gd")` names a class as surely
-        // as its `class_name` does: `Flows.new()` reaches that module.
-        for line in top_level(&text) {
-            if let Some((name, module)) = preloaded_script(&line) {
-                context.lazy.remove(&name);
-                context.consts.remove(&name);
-                context.classes.entry(name).or_insert(module);
-            }
-        }
+        absorb(&mut context, &text);
     }
     name_functions(&mut context, functions);
     // A static's default is Rune too, and is inlined wherever it is read.
@@ -443,6 +513,54 @@ fn collect_bools(context: &mut Context, functions: &[Function]) {
             .is_some_and(|ret| ret.trim().starts_with("bool"))
         {
             context.bools.insert(function.name.clone());
+        }
+    }
+}
+
+/// Each function's parameters typed `String`, under the name the function
+/// has here, so a body indexes them by character and a same-named list in
+/// another function still indexes by element.
+fn collect_strings(context: &mut Context, functions: &[Function]) {
+    for function in functions {
+        // A method declared `-> String` names a string where it is called.
+        let signature = function.lines.first().map_or("", String::as_str);
+        if signature
+            .split("->")
+            .nth(1)
+            .is_some_and(|ret| ret.trim().starts_with("String"))
+        {
+            context.strings.insert(function.name.clone());
+        }
+        if function.strings.is_empty() {
+            continue;
+        }
+        let mut name = HOOKS
+            .iter()
+            .find(|(godot, _, _)| *godot == function.name)
+            .map_or(function.name.clone(), |(_, here, _)| (*here).to_string());
+        if RESERVED.contains(&name.as_str()) {
+            name.push('_');
+        }
+        context.string_params.insert(name, function.strings.clone());
+    }
+}
+
+/// A level's members typed `String` or valued with a string literal.
+fn string_members(context: &mut Context, text: &str) {
+    for line in top_level(text) {
+        let body = declaration_start(&line).unwrap_or(&line);
+        let Some(rest) = body.strip_prefix("var ") else {
+            continue;
+        };
+        let rest = members::declared(rest);
+        let name = name_of(rest);
+        let after = rest[name.len()..].trim_start();
+        let typed = after
+            .strip_prefix(':')
+            .is_some_and(|t| t.trim_start().starts_with("String"));
+        let valued = assigned(rest).is_some_and(|v| v.starts_with('"'));
+        if typed || valued {
+            context.strings.insert(name);
         }
     }
 }
@@ -596,92 +714,6 @@ fn preloaded_script(line: &str) -> Option<(String, String)> {
     Some((name, format!("{module}.rn")))
 }
 
-/// A file's inner `class Name:` blocks, each as the source of a script of its
-/// own: `extends` its base, or `RefCounted`, then its body one level out.
-pub(crate) fn inner_classes(source: &str) -> Vec<(String, String)> {
-    let lines: Vec<&str> = source.lines().collect();
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < lines.len() {
-        let line = lines[i];
-        i += 1;
-        let Some(rest) = line.strip_prefix("class ") else {
-            continue;
-        };
-        let head = rest
-            .split('#')
-            .next()
-            .unwrap_or_default()
-            .trim()
-            .trim_end_matches(':');
-        let name = name_of(head);
-        let base = head
-            .split_once(" extends ")
-            .map_or("RefCounted", |(_, base)| base.trim());
-        let mut body: Vec<&str> = Vec::new();
-        while i < lines.len() && (lines[i].trim().is_empty() || lines[i].starts_with([' ', '\t'])) {
-            body.push(lines[i]);
-            i += 1;
-        }
-        let unit = body
-            .iter()
-            .filter(|l| !l.trim().is_empty())
-            .map(|l| l.len() - l.trim_start().len())
-            .min()
-            .unwrap_or(0);
-        let mut text = format!("extends {base}\n");
-        for l in body {
-            text.push_str(l.get(unit..).unwrap_or_default());
-            text.push('\n');
-        }
-        out.push((name, text));
-    }
-    out
-}
-
-/// A file's functions with defaulted parameters, and how many each takes.
-/// Every signal a file declares, with how many values it carries.
-pub(crate) fn signal_arities(source: &str) -> BTreeMap<String, usize> {
-    declarations(source).signal_arity
-}
-
-/// Every function a file declares, under the Rune name it is emitted with.
-pub(crate) fn function_names(source: &str) -> std::collections::BTreeSet<String> {
-    split_functions(source)
-        .into_iter()
-        .map(|f| {
-            if f.name == "_init" {
-                "new".to_string()
-            } else {
-                f.name
-            }
-        })
-        .collect()
-}
-
-pub(crate) fn defaulted(source: &str) -> BTreeMap<String, usize> {
-    split_functions(source)
-        .into_iter()
-        .filter(|f| f.defaults.iter().any(Option::is_some))
-        // `new` takes what `_init` takes.
-        .map(|f| {
-            (
-                if f.name == "_init" {
-                    "new".to_string()
-                } else {
-                    f.name
-                },
-                f.params.len(),
-            )
-        })
-        .collect()
-}
-
-/// Where an inner class of `file` is written: beside it, named for both.
-pub(crate) fn inner_file(file: &str, name: &str) -> String {
-    format!("{}__{name}.gd", file.trim_end_matches(".gd"))
-}
-
 /// A file's `static var`s, each with the GDScript text of its default.
 pub(crate) fn static_vars(source: &str) -> BTreeMap<String, String> {
     declarations(source).static_vars
@@ -807,6 +839,7 @@ fn write_functions(
     static_init: bool,
 ) {
     let mut seen: Vec<String> = Vec::new();
+    let mut widget_keys: BTreeSet<String> = BTreeSet::new();
     let mut forwarders: std::collections::BTreeMap<String, (String, bool)> =
         std::collections::BTreeMap::new();
     if static_init {
@@ -896,8 +929,12 @@ fn write_functions(
         for (signal, handler) in body.forwarders {
             forwarders.entry(signal).or_insert(handler);
         }
+        widget_keys.extend(body.widget_forwarders);
     }
     write_forwarders(out, functions, context, &forwarders);
+    write_widget_forwarders(out, &widget_keys);
+    write_input_hooks(out, functions);
+    write_draw_hook(out, functions);
 }
 
 /// What a function does before its own body: an int parameter truncated,
@@ -929,6 +966,9 @@ fn write_prologue(
     }
     // Godot's `set_process` switched the hook off; here it sets a flag,
     // and the hook reads it.
+    if name == "update" && functions.iter().any(|f| f.name == "_draw") {
+        out.push_str(DRAW_CALL);
+    }
     for (hook, flag) in [
         ("update", PROCESS_FLAG),
         ("fixed_update", PHYSICS_PROCESS_FLAG),
@@ -1055,14 +1095,18 @@ fn parse_signature(signature: &str, is_static: bool) -> Function {
         .and_then(|tail| tail.rsplit_once(')'))
         .map(|(inside, _)| inside.to_string())
         .unwrap_or_default();
-    let ints: Vec<String> = split_top(&params)
-        .into_iter()
-        .filter_map(|p| {
-            let (name, rest) = p.trim().split_once(':')?;
-            let hint = rest.split('=').next().unwrap_or_default().trim();
-            (hint == "int").then(|| name.trim().to_string())
-        })
-        .collect();
+    let typed = |wanted: &str| -> Vec<String> {
+        split_top(&params)
+            .into_iter()
+            .filter_map(|p| {
+                let (name, rest) = p.trim().split_once(':')?;
+                let hint = rest.split('=').next().unwrap_or_default().trim();
+                (hint == wanted).then(|| name.trim().to_string())
+            })
+            .collect()
+    };
+    let ints = typed("int");
+    let strings = typed("String");
     let (params, defaults): (Vec<String>, Vec<Option<String>>) = split_top(&params)
         .into_iter()
         .filter(|p| !p.trim().is_empty())
@@ -1086,6 +1130,7 @@ fn parse_signature(signature: &str, is_static: bool) -> Function {
         params,
         defaults,
         ints,
+        strings,
         is_static,
         overridden: false,
         lines: Vec::new(),
@@ -1110,6 +1155,11 @@ fn push_comment(out: &mut String, line: &str, indent: &str) {
 
 mod class;
 mod constants;
+mod draw;
+mod inner;
+mod input;
 mod members;
+#[cfg(test)]
+mod port_tests;
 #[cfg(test)]
 mod tests;

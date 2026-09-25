@@ -5,6 +5,11 @@
 //! it was written and counted in the report, which is how the next rows get
 //! chosen.
 
+mod controls;
+mod globals;
+
+pub(crate) use globals::{global_constant, singleton_write};
+
 use super::emit::{quoted, safe};
 
 /// What `get_tree()` becomes. Its verbs are the scene module's, so the
@@ -58,6 +63,28 @@ pub(crate) fn implicit_self(name: &str, args: &[String]) -> Option<String> {
         "set_process_input",
         "set_process_unhandled_input",
         "set_process_unhandled_key_input",
+        "release_focus",
+        "has_focus",
+        "accept_event",
+        "get_viewport_transform",
+        "get_global_transform_with_canvas",
+        "get_child_count",
+        "create_timer",
+        "add_title_bar_control",
+        "queue_redraw",
+        "draw_circle",
+        "draw_line",
+        "draw_rect",
+        "draw_arc",
+        "draw_polyline",
+        "draw_multiline",
+        "draw_polygon",
+        "draw_colored_polygon",
+        "draw_texture_rect",
+        "draw_texture_rect_region",
+        "draw_set_transform",
+        "draw_set_transform_matrix",
+        "draw_string",
         "clear",
         "add_item",
         "add_icon_item",
@@ -110,17 +137,35 @@ pub(crate) fn global(name: &str, args: &[String]) -> Option<String> {
     }
     let all = args.join(", ");
     let one = args.first().cloned().unwrap_or_default();
+    if let Some(text) = globals::arithmetic(name, &all, &one) {
+        return Some(text);
+    }
+    if let Some(text) = controls::own_control(name, &all) {
+        return Some(text);
+    }
     Some(match name {
         // Variant conversions and queries live in the shim, which dispatches
         // on the value the way Godot's Variant did.
         "str" | "int" | "float" | "bool" => format!("(gd.{name})({all})"),
+        "String" if args.len() == 1 => format!("(gd.str)({one})"),
+        "char" => format!("(gd.chr)({one})"),
+        // A `SceneTree` script's own `quit`, which a tool run calls bare.
+        "quit" => format!(
+            "engine::quit({})",
+            args.first().cloned().unwrap_or_else(|| "0".into())
+        ),
         "len" => format!("(gd.size)({one})"),
+        // Object's own `get` and `set`, called bare: a member by its name.
+        "get" if args.len() == 1 => format!("(gd.field)(this, {one})"),
+        "set" if args.len() == 2 => format!("(gd.set_field)(this, {all})"),
         "is_instance_valid" => format!("(gd.valid)({one})"),
         "typeof" => format!("(gd.type_of)({one})"),
         "is_zero_approx" => format!("(gd.is_zero_approx)({one})"),
         "hash" => format!("(gd.hash)({one})"),
         "is_equal_approx" => format!("(gd.is_equal_approx)({all})"),
         "weakref" => one,
+        // A debugging aid with no stack to show: an empty list of frames.
+        "get_stack" => "[]".into(),
         // A literal bound is an int already; anything else may be a float,
         // which Godot truncates and a Rune range refuses.
         "range" => {
@@ -136,24 +181,6 @@ pub(crate) fn global(name: &str, args: &[String]) -> Option<String> {
         "print" | "prints" | "printt" | "print_rich" => format!("log::info((gd.str_all)([{all}]))"),
         "push_error" | "printerr" => format!("log::error((gd.str_all)([{all}]))"),
         "push_warning" => format!("log::warn((gd.str_all)([{all}]))"),
-        "sqrt" => format!("math::sqrt({one})"),
-        "pow" => format!("math::pow({all})"),
-        "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "exp" | "log" => {
-            format!("math::{name}({one})")
-        }
-        "atan2" => format!("math::atan2({all})"),
-        "deg_to_rad" => format!("math::rad({one})"),
-        "rad_to_deg" => format!("math::deg({one})"),
-        "lerp" | "lerpf" => format!("(gd.lerp)({all})"),
-        "sign" | "signf" | "signi" => format!("(gd.sign)({one})"),
-        "snapped" | "snappedf" | "snappedi" => format!("(gd.snapped)({all})"),
-        "fmod" | "fposmod" => format!("(gd.fmod)({all})"),
-        "move_toward" => format!("(gd.move_toward)({all})"),
-        "randf" => "rng::random()".into(),
-        "randi" => "rng::int(0, 2147483647)".into(),
-        "randi_range" => format!("rng::int({all})"),
-        "randf_range" => format!("rng::range({all})"),
-        "randomize" => "()".into(),
         "tr" => format!("strings::tr({all})"),
         "Vector2" | "Vector2i" if args.is_empty() => "(gd.vec2)(0.0, 0.0)".into(),
         "Vector2" | "Vector2i" if args.len() == 1 => format!("(gd.vec_of)({one})"),
@@ -253,8 +280,22 @@ pub(crate) fn static_call(class: &str, name: &str, args: &[String]) -> Option<St
         ("OS", "get_locale" | "get_locale_language") => "strings::locale()".into(),
         ("ConfigFile", "new") => "(gd.config)()".into(),
         ("OS", "get_cmdline_args" | "get_cmdline_user_args") => "engine::args()".into(),
+        ("OS", "get_environment") => format!("(gd.environment)({one})"),
+        ("OS", "has_environment") => format!("(gd.has_environment)({one})"),
         ("JSON", "stringify") => format!("json::encode({one})"),
         ("JSON", "parse_string") => format!("json::parse({one})"),
+        ("JSON", "new") => "(gd.json_object)()".into(),
+        ("Shader", "new") => "(gd.shader)()".into(),
+        ("ArrayMesh", "new") => "(gd.array_mesh)()".into(),
+        ("MultiMesh", "new") => "(gd.multimesh)()".into(),
+        ("RegEx", "new") => "(gd.regexp)()".into(),
+        ("RegEx", "create_from_string") => format!("(gd.regexp_of)({one})"),
+        // A texture is a path here, so an image loaded from one is that path.
+        ("Image", "new") => "(gd.image)()".into(),
+        ("ImageTexture", "create_from_image") => format!("(gd.image_texture)({one})"),
+        ("ShaderMaterial", "new") => "(gd.shader_material)()".into(),
+        ("CircleShape2D", "new") => "(gd.circle_shape)()".into(),
+        ("RectangleShape2D", "new") => "(gd.rect_shape)()".into(),
         ("FileAccess", "open") => format!("(gd.file_open)({all})"),
         ("FileAccess", "get_open_error") => "(gd.file_error)()".into(),
         ("FileAccess", "get_modified_time") => format!("fs::mtime((gd.project_path)({one}))"),
@@ -283,6 +324,77 @@ pub(crate) fn static_call(class: &str, name: &str, args: &[String]) -> Option<St
         ("Input", "is_action_pressed") => format!("input::is_action_pressed({one})"),
         ("Input", "is_action_just_pressed") => format!("input::is_action_just_pressed({one})"),
         ("Input", "is_key_pressed") => format!("input::is_down({one})"),
+        _ => return service_call(class, name, args),
+    })
+}
+
+// Rows share values without sharing meaning, as `static_call`'s do.
+#[allow(clippy::match_same_arms)]
+/// The rest of Godot's singletons: the services a game reaches for less
+/// often, each onto the engine module that answers it.
+fn service_call(class: &str, name: &str, args: &[String]) -> Option<String> {
+    let all = args.join(", ");
+    let one = args.first().cloned().unwrap_or_default();
+    Some(match (class, name) {
+        // Godot's buttons count from one; the engine's from zero.
+        ("Input", "is_mouse_button_pressed") => format!("input::is_mouse_down({one} - 1)"),
+        ("Performance", "get_monitor") => format!("(gd.monitor)({one})"),
+        ("ResourceLoader", "exists") => format!("fs::exists((gd.project_path)({one}))"),
+        ("ResourceLoader", "load") if !args.is_empty() => loaded(&args[0]),
+        ("Marshalls", "base64_to_raw" | "base64_to_utf8") => {
+            format!("encoding::from_base64({one})")
+        }
+        ("Marshalls", "raw_to_base64" | "utf8_to_base64") => format!("encoding::base64({one})"),
+        ("FileAccess", "get_sha256") => format!("hash::sha256((gd.project_path)({one}))"),
+        ("DirAccess", "rename_absolute") => format!("fs::rename({all})"),
+        ("DirAccess", "remove_absolute") => format!("fs::remove({one})"),
+        ("DirAccess", "open") => format!("(gd.dir_open)({one})"),
+        ("DisplayServer", "screen_set_keep_on") => format!("window::set_keep_awake({one})"),
+        // A platform has the display verbs this table carries, and no other.
+        ("DisplayServer", "has_method") => {
+            let known = [
+                "screen_set_keep_on",
+                "virtual_keyboard_get_height",
+                "window_get_size",
+            ]
+            .iter()
+            .any(|verb| one.trim_matches('"') == *verb);
+            known.to_string()
+        }
+        ("DisplayServer", "virtual_keyboard_get_height") => "input::keyboard_height()".into(),
+        // The page answers the one question the game asks of the browser;
+        // a reload and a heap probe get nothing. Decided on the literal,
+        // since the shim compiles in builds that carry no `web` module.
+        ("JavaScriptBridge", "eval") if one.contains("document.hidden") => "!web::visible()".into(),
+        ("JavaScriptBridge", "eval") if one.contains("reload") => "()".into(),
+        ("JavaScriptBridge", "eval") => "-1".into(),
+        ("JavaScriptBridge", "get_interface") => "()".into(),
+        ("Vector2", "from_angle") => format!("(gd.vec_from_angle)({one})"),
+        // Every bus is the master bus here, as `get_bus_index` says.
+        ("AudioServer", "set_bus_volume_db") if args.len() == 2 => {
+            format!(
+                "audio::set_bus_volume(\"master\", (gd.db_to_linear)({}))",
+                args[1]
+            )
+        }
+        ("AudioServer", "get_bus_volume_db") => {
+            "(gd.linear_to_db)(audio::bus_volume(\"master\"))".into()
+        }
+        ("AudioServer", "set_bus_mute") if args.len() == 2 => format!(
+            "audio::set_bus_volume(\"master\", if {} {{ 0.0 }} else {{ 1.0 }})",
+            args[1]
+        ),
+        ("AudioServer", "is_bus_mute") => "(audio::bus_volume(\"master\") <= 0.0)".into(),
+        ("Geometry2D", "is_point_in_polygon") if args.len() == 2 => {
+            format!("geometry2d::contains({}, {})", args[1], args[0])
+        }
+        // Godot's y runs down and the engine's up, so the winding flips.
+        ("Geometry2D", "is_polygon_clockwise") => format!("!geometry2d::is_clockwise({one})"),
+        ("Geometry2D", "merge_polygons") => format!("(gd.merge_polygons)({all})"),
+        ("Geometry2D", "segment_intersects_segment") => {
+            format!("geometry2d::segments_intersect({all})")
+        }
+        ("Geometry2D", "triangulate_polygon") => format!("(gd.triangulate)({one})"),
         _ => return None,
     })
 }
@@ -306,6 +418,12 @@ pub(crate) fn static_value(class: &str, name: &str) -> Option<String> {
         ("Color", "WHITE") => "(gd.color)(1.0, 1.0, 1.0, 1.0)".into(),
         ("Color", "BLACK") => "(gd.color)(0.0, 0.0, 0.0, 1.0)".into(),
         ("Color", "TRANSPARENT") => "(gd.color)(0.0, 0.0, 0.0, 0.0)".into(),
+        ("Color", "RED") => "(gd.color)(1.0, 0.0, 0.0, 1.0)".into(),
+        ("Color", "GREEN") => "(gd.color)(0.0, 1.0, 0.0, 1.0)".into(),
+        ("Color", "BLUE") => "(gd.color)(0.0, 0.0, 1.0, 1.0)".into(),
+        ("Color", "YELLOW") => "(gd.color)(1.0, 1.0, 0.0, 1.0)".into(),
+        ("Color", "ORANGE") => "(gd.color)(1.0, 0.647, 0.0, 1.0)".into(),
+        ("Color", "GRAY") => "(gd.color)(0.75, 0.75, 0.75, 1.0)".into(),
         ("Vector2", "INF") => "(gd.vec2)(1.0 / 0.0, 1.0 / 0.0)".into(),
         ("Transform2D", "IDENTITY") => "balaur::Transform2d::IDENTITY".into(),
         (class, name) => class_constant(class, name)?.to_string(),
@@ -316,13 +434,17 @@ pub(crate) fn static_value(class: &str, name: &str) -> Option<String> {
 // Rows share values without sharing meaning, as `global_constant`'s do.
 #[allow(clippy::match_same_arms)]
 fn class_constant(class: &str, name: &str) -> Option<i64> {
+    if let Some(value) = controls::control_constant(class, name) {
+        return Some(value);
+    }
     Some(match (class, name) {
-        ("Control", "MOUSE_FILTER_STOP") => 0,
-        ("Control", "MOUSE_FILTER_PASS") => 1,
-        ("Control", "MOUSE_FILTER_IGNORE") => 2,
-        ("Control", "FOCUS_NONE") => 0,
-        ("Control", "FOCUS_CLICK") => 1,
-        ("Control", "FOCUS_ALL") => 2,
+        // Godot 4 also spells a Control enum by its own name: `MouseFilter.X`.
+        ("Control" | "MouseFilter", "MOUSE_FILTER_STOP") => 0,
+        ("Control" | "MouseFilter", "MOUSE_FILTER_PASS") => 1,
+        ("Control" | "MouseFilter", "MOUSE_FILTER_IGNORE") => 2,
+        ("Control" | "FocusMode", "FOCUS_NONE") => 0,
+        ("Control" | "FocusMode", "FOCUS_CLICK") => 1,
+        ("Control" | "FocusMode", "FOCUS_ALL") => 2,
         ("Control", "SIZE_SHRINK_BEGIN") => 0,
         ("Control", "SIZE_FILL") => 1,
         ("Control", "SIZE_EXPAND") => 2,
@@ -332,6 +454,45 @@ fn class_constant(class: &str, name: &str) -> Option<i64> {
         ("Control", "PRESET_TOP_LEFT") => 0,
         ("Control", "PRESET_CENTER") => 8,
         ("Control", "PRESET_FULL_RECT") => 15,
+        ("Control" | "CursorShape", "CURSOR_ARROW") => 0,
+        ("Control" | "CursorShape", "CURSOR_IBEAM") => 1,
+        ("Control" | "CursorShape", "CURSOR_POINTING_HAND") => 2,
+        ("Control" | "CursorShape", "CURSOR_CROSS") => 3,
+        ("Control" | "CursorShape", "CURSOR_WAIT") => 4,
+        ("Control" | "CursorShape", "CURSOR_BUSY") => 5,
+        ("Control" | "CursorShape", "CURSOR_DRAG") => 6,
+        ("Control" | "CursorShape", "CURSOR_CAN_DROP") => 7,
+        ("Control" | "CursorShape", "CURSOR_FORBIDDEN") => 8,
+        ("Control" | "CursorShape", "CURSOR_VSIZE") => 9,
+        ("Control" | "CursorShape", "CURSOR_HSIZE") => 10,
+        ("Control" | "CursorShape", "CURSOR_BDIAGSIZE") => 11,
+        ("Control" | "CursorShape", "CURSOR_FDIAGSIZE") => 12,
+        ("Control" | "CursorShape", "CURSOR_MOVE") => 13,
+        ("Control" | "CursorShape", "CURSOR_VSPLIT") => 14,
+        ("Control" | "CursorShape", "CURSOR_HSPLIT") => 15,
+        ("Control" | "CursorShape", "CURSOR_HELP") => 16,
+        ("BoxContainer" | "FlowContainer", "ALIGNMENT_BEGIN") => 0,
+        ("BoxContainer" | "FlowContainer", "ALIGNMENT_CENTER") => 1,
+        ("BoxContainer" | "FlowContainer", "ALIGNMENT_END") => 2,
+        ("ScrollContainer", "SCROLL_MODE_DISABLED") => 0,
+        ("ScrollContainer", "SCROLL_MODE_AUTO") => 1,
+        ("ScrollContainer", "SCROLL_MODE_SHOW_ALWAYS") => 2,
+        ("ScrollContainer", "SCROLL_MODE_SHOW_NEVER") => 3,
+        ("Mesh", "ARRAY_VERTEX") => 0,
+        ("Mesh", "PRIMITIVE_TRIANGLES") => 3,
+        ("Mesh", "ARRAY_MAX") => 13,
+        // The monitor ids `gd.monitor` answers; the two only have to agree.
+        ("Performance", "TIME_FPS") => 0,
+        ("Performance", "TIME_PROCESS") => 1,
+        ("Performance", "TIME_PHYSICS_PROCESS") => 2,
+        ("Performance", "MEMORY_STATIC") => 4,
+        ("Performance", "MEMORY_STATIC_MAX") => 5,
+        ("Performance", "OBJECT_COUNT") => 7,
+        ("Performance", "OBJECT_NODE_COUNT") => 9,
+        ("Performance", "OBJECT_ORPHAN_NODE_COUNT") => 10,
+        ("Performance", "RENDER_TOTAL_OBJECTS_IN_FRAME") => 11,
+        ("Performance", "RENDER_TOTAL_DRAW_CALLS_IN_FRAME") => 13,
+        ("Performance", "RENDER_VIDEO_MEM_USED") => 14,
         ("TextureRect", "EXPAND_KEEP_SIZE") => 0,
         ("TextureRect", "EXPAND_IGNORE_SIZE") => 1,
         ("TextureRect", "EXPAND_FIT_WIDTH") => 2,
@@ -384,6 +545,12 @@ pub(crate) fn value_type(name: &str) -> Option<&'static str> {
 /// A name used as a value: Godot's enums and singletons that have a constant
 /// counterpart here.
 pub(crate) fn constant(name: &str) -> Option<String> {
+    // A key is its name here: `KEY_A` is what `input.is_down("A")` reads.
+    if let Some(key) = name.strip_prefix("KEY_")
+        && key.len() == 1
+    {
+        return Some(quoted(key));
+    }
     Some(match name {
         "PI" => "math::PI".into(),
         "TAU" => "math::TAU".into(),
@@ -450,6 +617,7 @@ pub(crate) const BUILTIN_SIGNALS: &[&str] = &[
 /// The node properties `field` in the shim reads off a node at run time.
 const NODE_PROPERTIES: &[&str] = &[
     "zoom",
+    "foldable_group",
     "position",
     "global_position",
     "scale",
@@ -476,6 +644,8 @@ pub(crate) fn property(receiver: &str, field: &str) -> Option<String> {
     }
     Some(match field {
         "visible" => format!("{receiver}.visible()"),
+        // Kept beside the node by the shim: the engine has no fold groups.
+        "foldable_group" => format!("(gd.field)({receiver}, \"foldable_group\")"),
         "global_position" => format!("(gd.global_position_of)({receiver})"),
         "position" => format!("(gd.position_of)({receiver})"),
         "scale" => format!("(gd.vec_of)({receiver}.transform.scale)"),
@@ -561,34 +731,6 @@ fn loaded(arg: &str) -> String {
     }
 }
 
-// Several rows share a value without sharing a meaning: `CONNECT_ONE_SHOT` is
-// not a mouse button, and merging them would hide what each row is for.
-#[allow(clippy::match_same_arms)]
-pub(crate) fn global_constant(name: &str) -> Option<&'static str> {
-    Some(match name {
-        "MOUSE_BUTTON_LEFT" => "1",
-        "MOUSE_BUTTON_RIGHT" => "2",
-        "MOUSE_BUTTON_MIDDLE" => "3",
-        "MOUSE_BUTTON_WHEEL_UP" => "4",
-        "MOUSE_BUTTON_WHEEL_DOWN" => "5",
-        "CONNECT_ONE_SHOT" => "4",
-        "CONNECT_DEFERRED" => "1",
-        "HORIZONTAL" => "0",
-        "VERTICAL" => "1",
-        "HORIZONTAL_ALIGNMENT_LEFT" | "VERTICAL_ALIGNMENT_TOP" => "0",
-        "HORIZONTAL_ALIGNMENT_CENTER" | "VERTICAL_ALIGNMENT_CENTER" => "1",
-        "HORIZONTAL_ALIGNMENT_RIGHT" | "VERTICAL_ALIGNMENT_BOTTOM" => "2",
-        "HORIZONTAL_ALIGNMENT_FILL" | "VERTICAL_ALIGNMENT_FILL" => "3",
-        "SIZE_SHRINK_BEGIN" => "0",
-        "SIZE_FILL" => "1",
-        "SIZE_EXPAND" => "2",
-        "SIZE_EXPAND_FILL" => "3",
-        "SIZE_SHRINK_CENTER" => "4",
-        "SIZE_SHRINK_END" => "8",
-        _ => return None,
-    })
-}
-
 /// What the importer could not translate, as something that compiles and says
 /// so at run time. A file that does not compile stops the whole project, and
 /// the port needs one that boots.
@@ -631,6 +773,14 @@ pub(crate) fn setter(receiver: &str, field: &str, value: &str) -> Option<String>
     }
     Some(match field {
         "visible" => format!("{receiver}.set_visible({value})"),
+        // Godot numbers its cursor shapes; the widget names its `cursor`.
+        "mouse_default_cursor_shape" => format!(
+            "{receiver}.patch_component(\"widget\", #{{ \"cursor\": (gd.cursor_word)({value}) }})"
+        ),
+        // `MOUSE_FILTER_IGNORE` is 2; the other two keep the pointer.
+        "mouse_filter" => format!(
+            "{receiver}.patch_component(\"widget\", #{{ \"pointer_through\": {value} == 2 }})"
+        ),
         "position" => format!("(gd.set_position)({receiver}, {value})"),
         "global_position" => format!("(gd.set_global_position)({receiver}, {value})"),
         "scale" => format!("(gd.set_scale)({receiver}, {value})"),
@@ -689,6 +839,84 @@ fn config_verb(name: &str) -> Option<&'static str> {
     })
 }
 
+/// Godot's `_draw` verbs on a node, through the shim, which takes the
+/// node's transform into account and draws for this frame. `queue_redraw`
+/// asks for nothing: every frame draws.
+fn draw_verb(receiver: &str, name: &str, args: &[String]) -> Option<String> {
+    // Each verb with how many arguments Godot's takes, defaults included:
+    // a Rune function takes every one, so a shorter call is padded with nil.
+    const VERBS: &[(&str, usize)] = &[
+        ("draw_circle", 6),
+        ("draw_line", 5),
+        ("draw_rect", 5),
+        ("draw_arc", 8),
+        ("draw_polyline", 4),
+        ("draw_multiline", 4),
+        ("draw_polygon", 4),
+        ("draw_colored_polygon", 4),
+        ("draw_texture_rect", 5),
+        ("draw_texture_rect_region", 6),
+        ("draw_set_transform", 3),
+        ("draw_set_transform_matrix", 1),
+        ("draw_string", 7),
+    ];
+    if name == "queue_redraw" {
+        return Some(format!("(gd.queue_redraw)({receiver})"));
+    }
+    let (_, takes) = VERBS.iter().find(|(verb, _)| *verb == name)?;
+    let mut parts: Vec<String> = args.iter().take(*takes).cloned().collect();
+    parts.resize(*takes, "()".to_string());
+    Some(format!("(gd.{name})({receiver}, {})", parts.join(", ")))
+}
+
+/// What a node answers about itself: its hash, its children, its focus and
+/// where the canvas put it.
+fn node_query(receiver: &str, name: &str, args: &[String]) -> Option<String> {
+    let one = args.first().cloned().unwrap_or_default();
+    Some(match name {
+        // `name.hash()`: the global `hash` on any value, as Godot answers it.
+        "hash" if args.is_empty() => format!("(gd.hash)({receiver})"),
+        "get_canvas_transform" | "get_viewport_transform" => {
+            format!("(gd.canvas_transform)({receiver})")
+        }
+        "get_child_count" => format!("{receiver}.children().len()"),
+        "has_focus" => format!("(gd.same)(ui::focused(), {receiver})"),
+        // Focus is the widget layer's to give, and a foldable's title bar is
+        // its `fold` widget's header.
+        "release_focus" | "add_title_bar_control" => "()".into(),
+        // The hook that handed the event over answers `true` for it.
+        "accept_event" | "set_input_as_handled" => "(gd.set_input_handled)()".into(),
+        // A per-node switch the hooks the translator writes read first.
+        "set_process_input" | "set_process_unhandled_input" | "set_process_unhandled_key_input" => {
+            if receiver == "this.node" {
+                format!("this.input_enabled = {one}")
+            } else {
+                format!("(gd.set_field)({receiver}, \"input_enabled\", {one})")
+            }
+        }
+        _ => return None,
+    })
+}
+
+/// The scene tree's own verbs, which Godot reached through `get_tree()`. The
+/// receiver is the tree and carries nothing here.
+fn tree_verb(receiver: &str, name: &str, args: &[String]) -> Option<String> {
+    let one = args.first().cloned().unwrap_or_default();
+    Some(match name {
+        "get_nodes_in_group" => format!("scene::tagged({one})"),
+        "create_timer" => format!("(gd.timer)({one})"),
+        "change_scene_to_file" | "change_scene_to_packed" => format!("scene::switch({one})"),
+        "reload_current_scene" => "scene::switch(scene::source())".into(),
+        "quit" if receiver == TREE => format!(
+            "engine::quit({})",
+            args.first().cloned().unwrap_or("0".into())
+        ),
+        "get_root" => "scene::root()".into(),
+        "get_first_node_in_group" => format!("(gd.front)(scene::tagged({one}))"),
+        _ => return None,
+    })
+}
+
 /// A method on a value. The receiver's text is passed so a rewrite can put it
 /// where the engine call wants it.
 #[allow(clippy::match_same_arms)]
@@ -696,6 +924,18 @@ pub(crate) fn method(receiver: &str, name: &str, args: &[String]) -> Option<Stri
     let all = args.join(", ");
     let one = args.first().cloned().unwrap_or_default();
     if let Some(text) = tween_verb(receiver, name, args) {
+        return Some(text);
+    }
+    if let Some(text) = node_query(receiver, name, args) {
+        return Some(text);
+    }
+    if let Some(text) = draw_verb(receiver, name, args) {
+        return Some(text);
+    }
+    if let Some(text) = tree_verb(receiver, name, args) {
+        return Some(text);
+    }
+    if let Some(text) = controls::control_verb(receiver, name, args) {
         return Some(text);
     }
     // A shim verb takes the value Godot called it on as its first argument.
@@ -733,7 +973,8 @@ pub(crate) fn method(receiver: &str, name: &str, args: &[String]) -> Option<Stri
         "add_child" => format!("(gd.add_child)({receiver}, {one})"),
         "get_parent" => format!("{receiver}.parent()"),
         "get_children" => format!("{receiver}.children()"),
-        "get_node" | "get_node_or_null" => format!("{receiver}.get_node({one})"),
+        // An unset `NodePath` export is nothing, and Godot answered null.
+        "get_node" | "get_node_or_null" => format!("(gd.node_at)({receiver}, {one})"),
         "instantiate" => format!("(gd.instantiate)({receiver})"),
         "find_child" => format!(
             "(gd.front)((gd.find_children)({receiver}, {one}, \"\", {}))",
@@ -767,18 +1008,6 @@ pub(crate) fn method(receiver: &str, name: &str, args: &[String]) -> Option<Stri
         _ if config_verb(name).is_some() => with_receiver(config_verb(name)?),
         // `call` on a node is the engine's own verb already.
         "call" | "call_deferred" => format!("(gd.call_value)({receiver}, [{all}])"),
-        // The scene tree's own verbs, which Godot reached through
-        // `get_tree()`. The receiver is the tree and carries nothing here.
-        "get_nodes_in_group" => format!("scene::tagged({one})"),
-        "create_timer" => format!("(gd.timer)({one})"),
-        "change_scene_to_file" | "change_scene_to_packed" => format!("scene::switch({one})"),
-        "reload_current_scene" => "scene::switch(scene::source())".into(),
-        "quit" if receiver == TREE => format!(
-            "engine::quit({})",
-            args.first().cloned().unwrap_or("0".into())
-        ),
-        "get_root" => "scene::root()".into(),
-        "get_first_node_in_group" => format!("(gd.front)(scene::tagged({one}))"),
         // Frame ordering and drawing, which the engine states differently.
         "is_node_ready" | "is_inside_tree" => format!("{receiver}.is_valid()"),
         // The viewport, which Godot reached through the node and the engine
@@ -789,12 +1018,7 @@ pub(crate) fn method(receiver: &str, name: &str, args: &[String]) -> Option<Stri
         }
         "get_size" if receiver != TREE => format!("(gd.size_of)({receiver})"),
         "get_size" | "get_screen_size" => "(gd.screen_size)()".into(),
-        "get_canvas_transform" => format!("(gd.canvas_transform)({receiver})"),
-        "set_notify_transform"
-        | "set_notify_local_transform"
-        | "set_process_input"
-        | "set_process_unhandled_input"
-        | "set_process_unhandled_key_input" => "()".into(),
+        "set_notify_transform" | "set_notify_local_transform" => "()".into(),
         "move_to_front" => format!("{receiver}.set_sibling_index(-1)"),
         "get_index" => format!("{receiver}.sibling_index()"),
         "remove_child" => format!("(gd.remove_child)({one})"),
@@ -900,7 +1124,7 @@ pub(crate) const HIDDEN_SIGNAL: &str = "hidden";
 /// The engine's own name for it, carrying the new value.
 pub(crate) const VISIBILITY_SIGNAL: &str = "visibility_changed";
 
-const ENGINE_SIGNALS: &[&str] = &[
+pub(crate) const ENGINE_SIGNALS: &[&str] = &[
     "timeout",
     "animation_finished",
     "finished",

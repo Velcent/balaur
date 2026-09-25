@@ -10,15 +10,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 use std::path::Path;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 
 const MAGIC: &[u8; 5] = b"BPAK\x02";
 
-/// File extensions that ship inside a pack. A game's textures, sounds and
-/// fonts have to travel with it; source art and notes do not.
+/// File extensions that ship inside a pack. A game's textures, sounds, fonts
+/// and the data it reads have to travel with it; source art and notes do not.
 pub const ASSET_EXTENSIONS: &[&str] = &[
     "png", "jpg", "jpeg", "webp", "svg", "bmp", "tga", "ogg", "wav", "mp3", "flac", "ttf", "otf",
-    "fnt", "glb", "gltf", "bin", "obj",
+    "fnt", "glb", "gltf", "bin", "obj", "json", "csv",
 ];
 
 /// How many of the heaviest entries a report names: enough to see where the
@@ -101,6 +101,9 @@ impl Pack {
         let ignored = crate::ignore::from_manifest(&pack.manifest);
         collect_files(&*fs, project_root, project_root, &ignored, &mut files);
         let nested = nested_roots(&files);
+        // Every script is compiled before the build fails, so one export
+        // names every file that does not compile rather than the first.
+        let mut failed: Vec<String> = Vec::new();
         for rel in files {
             let path = project_root.join(&rel);
             match Path::new(&rel).extension().and_then(|e| e.to_str()) {
@@ -112,7 +115,13 @@ impl Pack {
                         pack.scripts.insert(rel, source.into_bytes());
                         continue;
                     }
-                    let bytes = compiler.compile(&rel, &source)?;
+                    let bytes = match compiler.compile(&rel, &source) {
+                        Ok(bytes) => bytes,
+                        Err(err) => {
+                            failed.push(format!("{rel}: {err:#}"));
+                            continue;
+                        }
+                    };
                     pack.scripts.insert(
                         rel,
                         if keep_sources {
@@ -135,6 +144,13 @@ impl Pack {
                 }
                 _ => {}
             }
+        }
+        if !failed.is_empty() {
+            bail!(
+                "{} script(s) did not compile:\n{}",
+                failed.len(),
+                failed.join("\n")
+            );
         }
         Ok(pack)
     }

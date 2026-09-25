@@ -163,6 +163,8 @@ pub(super) fn lookups(
         classes: crate::godot::exports::class_index(root, files),
         shaders,
         checks: std::collections::BTreeMap::new(),
+        autoloads: Vec::new(),
+        main_scene: String::new(),
     };
     project.checks = crate::godot::machine::expression_scripts(root, files, &project);
     Ok(project)
@@ -419,13 +421,16 @@ metadata/_edit_lock_ = true
 text = "Sail"
 size_flags_vertical = 3
 toggle_mode = true
+mouse_default_cursor_shape = 2
 button_group = SubResource("ButtonGroup_tabs")
 
 [node name="Bars" type="MarginContainer" parent="."]
 theme_override_constants/margin_left = 12
+mouse_filter = 2
 
 [node name="Bottom" type="Button" parent="Bars"]
 text = "Menu"
+mouse_default_cursor_shape = 14
 size_flags_horizontal = 4
 size_flags_vertical = 8
 
@@ -570,7 +575,10 @@ bg_color = Color(0.2, 0.6, 0.2, 1)
 [resource]
 default_font_size = 40
 Button/colors/font_color = Color(0.4, 0.3, 0.2, 1)
+Button/colors/font_disabled_color = Color(0.5, 0.5, 0.5, 1)
 Button/styles/normal = SubResource("Plain")
+Button/styles/disabled = SubResource("Green")
+Button/styles/focus = SubResource("Green")
 ButtonGreen/base_type = &"Button"
 ButtonGreen/styles/normal = SubResource("Green")
 PanelContainer/styles/panel = SubResource("Plain")
@@ -731,6 +739,26 @@ func _process(_delta):
     }
 
     #[test]
+    fn a_control_s_cursor_shape_and_mouse_filter_land_on_the_widget() {
+        let godot = godot();
+        let out = tempfile::tempdir().unwrap();
+        import_project(&godot.path().join("project.godot"), out.path()).unwrap();
+        let scene = read(out.path(), "scenes/main.toml");
+        let go = node(&scene, "Go");
+        assert_eq!(go["widget"]["cursor"].as_str(), Some("hand"));
+        assert_eq!(
+            go["widget"].get("pointer_through"),
+            None,
+            "STOP keeps the pointer"
+        );
+        assert_eq!(
+            node(&scene, "Bars")["widget"]["pointer_through"].as_bool(),
+            Some(true),
+            "IGNORE lets it through"
+        );
+    }
+
+    #[test]
     fn a_godot_project_converts_node_by_node() {
         let godot = godot();
         let out = tempfile::tempdir().unwrap();
@@ -792,6 +820,11 @@ func _process(_delta):
         assert_eq!(
             node(&scene, "Bottom")["widget"]["anchor"].as_str(),
             Some("center_bottom")
+        );
+        assert_eq!(
+            node(&scene, "Bottom")["widget"]["cursor"].as_str(),
+            Some("resize_row"),
+            "VSPLIT is its own shape, not VSIZE"
         );
         assert_eq!(go["widget"]["group"].as_str(), Some("ButtonGroup_tabs"));
         assert_eq!(
@@ -962,6 +995,13 @@ func _process(_delta):
         let theme = read(out.path(), "themes/game.toml");
         assert_eq!(theme["button"]["radius"].as_float(), Some(16.0));
         assert_eq!(theme["button"]["size"].as_float(), Some(40.0));
+        assert_eq!(
+            theme["button"]["disabled"]["color"].as_str(),
+            Some("#808080ff"),
+            "a disabled state carries its font colour"
+        );
+        assert!(theme["button"]["disabled"]["fill"].as_str().is_some());
+        assert!(theme["button"]["focus"]["fill"].as_str().is_some());
         assert!(theme["roles"]["ButtonGreen"]["fill"].as_str().is_some());
     }
 

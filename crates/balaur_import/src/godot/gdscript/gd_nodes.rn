@@ -356,6 +356,20 @@ pub fn min_size(node) {
     vec2(0.0, 0.0)
 }
 
+/// Godot's `get_combined_minimum_size`: the stated minimum, or the size the
+/// widget layer last laid the node out at, whichever is larger.
+pub fn combined_min_size(node) {
+    let floor = min_size(node);
+    if !(node is balaur::Node) {
+        return floor;
+    }
+    let drawn = ui::widget_rect(node);
+    if drawn is Object && drawn.contains_key("w") {
+        return vec2(math::max(floor.x, float(drawn["w"])), math::max(floor.y, float(drawn["h"])));
+    }
+    floor
+}
+
 pub fn set_min_size(node, size) {
     if node is balaur::Node {
         node.patch_component("widget", #{ "min_width": float(size.x), "min_height": float(size.y) });
@@ -899,6 +913,8 @@ const LISTENERS = "__listeners";
 /// A Godot `Callable` over a class table: the object and the method name.
 const BOUND_OWNER = "__bound";
 const BOUND_METHOD = "__method";
+const CALL_KEY = "__call";
+const CALL_TAKES = "__takes";
 
 /// A class table's signal: each listener called with what was emitted.
 pub fn emit_obj(owner, name, args) {
@@ -920,7 +936,7 @@ pub fn unlisten(node, name, from) {
 /// zero, as Godot's is before its first layout.
 pub fn size_of(node) {
     if !(node is balaur::Node) {
-        return field(node, "size");
+        return vec_of(field(node, "size"));
     }
     let drawn = ui::widget_rect(node);
     if drawn is Object && drawn.contains_key("w") {
@@ -951,9 +967,109 @@ fn node_property(node, name) {
         "zoom" => camera_zoom(node),
         "selected" if node.has_component("widget") => option_index(node),
         "item_count" if node.has_component("widget") => option_count(node),
+        // Kept beside the node: the engine has no fold groups, and a material
+        // a script built is a record it never draws with.
+        "foldable_group" => get_meta(node, "foldable_group", ()),
+        "material" => get_meta(node, "material", ()),
+        "multimesh" => get_meta(node, "multimesh", ()),
+        "speed_scale" if node.has_component("animation") => float(get(node.get_component("animation"), "speed", 1.0)),
+        "current_animation" if node.has_component("animation") => {
+            let current = node.animation.current();
+            if is_nil(current) { "" } else { current }
+        }
         _ => (),
     };
     out
+}
+
+/// Godot's `get_theme_constant`: the widget key a theme constant lands on,
+/// as `theme_override` writes it; 0 for one the widget has no key for.
+pub fn theme_constant(node, name) {
+    if !(node is balaur::Node) || !node.has_component("widget") {
+        return 0;
+    }
+    let widget = node.get_component("widget");
+    if name.starts_with("margin_") {
+        let padding = get(widget, "padding", 0.0);
+        if padding is Vec {
+            let side = match name {
+                "margin_left" => 0,
+                "margin_top" => 1,
+                "margin_right" => 2,
+                _ => 3,
+            };
+            return float(padding[side]);
+        }
+        return float(padding);
+    }
+    if name == "separation" || name == "h_separation" || name == "v_separation" {
+        return float(get(widget, "gap", 0.0));
+    }
+    0
+}
+
+/// Godot's `get_theme_color`: the widget's text or icon colour.
+pub fn theme_color(node, name) {
+    if !(node is balaur::Node) || !node.has_component("widget") {
+        return color(1.0, 1.0, 1.0, 1.0);
+    }
+    let key = if name.starts_with("icon") { "icon_color" } else { "text_color" };
+    let value = get(node.get_component("widget"), key, ());
+    if is_nil(value) || value == "" {
+        return color(1.0, 1.0, 1.0, 1.0);
+    }
+    color_of(value)
+}
+
+pub fn theme_font_size(node, name) {
+    if !(node is balaur::Node) || !node.has_component("widget") {
+        return 16;
+    }
+    int(get(node.get_component("widget"), "font_size", 16.0))
+}
+
+/// Godot's `add_theme_*_override`: the widget key that carries the item, or
+/// nothing where the widget has none.
+pub fn theme_override(node, group, name, value) {
+    if !(node is balaur::Node) || !node.has_component("widget") {
+        return ();
+    }
+    let key = match (group, name) {
+        ("colors", "font_color") => "text_color",
+        ("colors", "default_color") => "text_color",
+        ("colors", "icon_normal_color") => "icon_color",
+        ("constants", "separation") => "gap",
+        ("constants", "h_separation") => "gap",
+        ("constants", "v_separation") => "gap",
+        ("constants", "margin_left") => "padding",
+        ("constants", "margin_top") => "padding",
+        ("constants", "margin_right") => "padding",
+        ("constants", "margin_bottom") => "padding",
+        ("font_sizes", "font_size") => "font_size",
+        ("font_sizes", "normal_font_size") => "font_size",
+        _ => return (),
+    };
+    let tinted = key == "text_color" || key == "icon_color";
+    let patch = #{};
+    patch[key] = if tinted { color_list(value) } else { float(value) };
+    node.patch_component("widget", patch);
+}
+
+/// A copy of a node and everything under it, placed under `parent`: each
+/// component's table patched onto a fresh node of the same name.
+pub fn clone_node(node, parent) {
+    let holder = if is_nil(parent) { detached() } else { parent };
+    let copy = holder.add_child(node.name());
+    for component in node.component_names() {
+        let table = node.get_component(component);
+        if table is Object {
+            let _ = script::attempt(|| copy.patch_component(component, table));
+        }
+    }
+    for child in node.children() {
+        clone_node(child, copy);
+    }
+    copy
 }
 
 /// A Camera2D's zoom as Godot's multiplier: the engine's is pixels a unit.
@@ -989,10 +1105,28 @@ fn set_node_property(node, name, value) {
         option_select(node, value);
     } else if name == "zoom" && node.has_component("camera2d") {
         node.patch_component("camera2d", #{ "zoom": float(value.x) * PIXELS });
+    } else if name == "foldable_group" || name == "material" {
+        set_meta(node, name, value);
+    } else if name == "speed_scale" && node.has_component("animation") {
+        node.patch_component("animation", #{ "speed": float(value) });
+    } else if name == "multimesh" && value is Object && value.contains_key("__multimesh") {
+        multimesh_attach(value, node);
+        set_meta(node, name, value);
+    } else if name == "shape" && value is Object && value.contains_key("__shape") {
+        node.patch_component("collider2d", collider_of(value));
     } else {
         return false;
     }
     true
+}
+
+/// The `collider2d` keys a shape record describes, in units.
+fn collider_of(shape) {
+    if shape["__shape"] == "circle" {
+        return #{ "kind": "circle", "radius": float(shape["radius"]) / PIXELS };
+    }
+    let size = vec_of(shape["size"]);
+    #{ "kind": "rect", "half_extents": [size.x / PIXELS / 2.0, size.y / PIXELS / 2.0] }
 }
 
 /// The method a call with `count` arguments reaches: `name__1` stands in
@@ -1179,11 +1313,12 @@ pub async fn wait_signal(owner, name) {
     value
 }
 
-/// A timer's `timeout.connect(f)`: `f` once the time has passed.
+/// A timer's `timeout.connect(f)`: `f` once the time has passed. The engine
+/// runs a tween's step itself, so a handler record is called from a closure.
 fn after(wait, f) {
     let t = create_tween(scene::root());
     tween_interval(t, wait["__after"]);
-    tween_callback(t, f);
+    tween_callback(t, || call_value(f, []));
     ()
 }
 
@@ -1246,6 +1381,12 @@ fn glob(pattern, name) {
 fn node_method(node, name, args) {
     let count = args.len();
     let a0 = if count > 0 { args[0] } else { () };
+    if node.has_component("animation") {
+        let out = player_method(node, name, args);
+        if out != NOT_A_PLAYER_VERB {
+            return out;
+        }
+    }
     if name == "to_global" {
         return global_transform(node) * vec_of(a0);
     }
@@ -1354,6 +1495,68 @@ fn option_method(node, name, args) {
     if name == "set_item_disabled" {
         return true;
     }
+}
+
+/// Godot's `AnimationPlayer` verbs on a node carrying `animation`: `play`
+/// starts a clip, a bare `play()` resumes, `advance` moves the playhead on.
+/// `NOT_A_PLAYER_VERB` for any other name.
+fn player_method(node, name, args) {
+    let count = args.len();
+    let a0 = if count > 0 { args[0] } else { () };
+    let player = node.animation;
+    if name == "play" && count > 0 && a0 != "" {
+        let speed = if count > 2 { float(args[2]) } else { 1.0 };
+        player.play(a0, #{ "speed": speed, "from_start": true });
+        return ();
+    }
+    if name == "play" || name == "resume" {
+        player.resume();
+        return ();
+    }
+    if name == "stop" || name == "pause" {
+        player.pause();
+        return ();
+    }
+    if name == "seek" {
+        player.seek(float(a0));
+        return ();
+    }
+    if name == "advance" {
+        player.seek(player.time() + float(a0));
+        return ();
+    }
+    if name == "queue" {
+        player.queue(a0);
+        return ();
+    }
+    if name == "clear_queue" {
+        return ();
+    }
+    if name == "is_playing" {
+        return player.is_playing();
+    }
+    if name == "has_animation" {
+        return has_clip(node, a0);
+    }
+    if name == "get_current_animation" || name == "get_assigned_animation" {
+        let current = player.current();
+        let name = if is_nil(current) { "" } else { current };
+        return name;
+    }
+    NOT_A_PLAYER_VERB
+}
+
+const NOT_A_PLAYER_VERB = "__not_a_player_verb";
+
+/// Whether the node's clip library holds a clip of that name.
+fn has_clip(node, name) {
+    let library = get(node.get_component("animation"), "library", ());
+    let (ok, clips) = script::attempt(|| assets::load(library));
+    if !ok || !(clips is Object) {
+        return false;
+    }
+    let held = get(clips, "clips", clips);
+    held is Object && held.contains_key(name)
 }
 
 fn option_items(node) {
@@ -1842,6 +2045,20 @@ pub fn call_value(target, args) {
     if target is std::ops::Function {
         return spread(target, args);
     }
+    // A connected handler says how many it takes: a signal carrying more is
+    // trimmed and one carrying fewer is padded, as Godot's defaults filled.
+    if target is Object && target.contains_key(CALL_KEY) {
+        let takes = target[CALL_TAKES];
+        let fitted = [];
+        for at in 0..takes {
+            if at < args.len() {
+                fitted.push(args[at]);
+            } else {
+                fitted.push(());
+            }
+        }
+        return spread(target[CALL_KEY], fitted);
+    }
     if target is Object && target.contains_key(BOUND_OWNER) {
         return invoke_many(target[BOUND_OWNER], target[BOUND_METHOD], args);
     }
@@ -1997,6 +2214,49 @@ pub fn invoke3(owner, name, a0, a1, a2) {
     native(owner, name, [a0, a1, a2])
 }
 
+/// The widget `cursor` word for one of Godot's `CursorShape` numbers; the
+/// arrow is the platform's own and is the empty word.
+pub fn cursor_word(shape) {
+    match shape {
+        1 => "text",
+        2 => "hand",
+        3 => "cross",
+        4 => "wait",
+        5 => "progress",
+        6 => "grab",
+        7 => "grabbing",
+        8 => "forbidden",
+        9 => "resize_y",
+        10 => "resize_x",
+        11 => "resize_nesw",
+        12 => "resize_nwse",
+        13 => "move",
+        14 => "resize_row",
+        15 => "resize_col",
+        16 => "help",
+        _ => "",
+    }
+}
+
+/// Godot's `OS.get_environment`: "" for a variable that is unset.
+pub fn environment(name) {
+    let value = engine::environment(name);
+    if is_nil(value) { "" } else { value }
+}
+
+pub fn has_environment(name) {
+    !is_nil(engine::environment(name))
+}
+
+/// Whether a widget signal's key names `handler`, which is what connecting
+/// it wrote.
+pub fn widget_connected(node, key, handler) {
+    if !(node is balaur::Node) || !node.has_component("widget") {
+        return false;
+    }
+    get(node.get_component("widget"), key, "") == handler
+}
+
 /// Writing a property on another script, through the setter every converted
 /// script carries.
 pub fn set_field(owner, name, value) {
@@ -2023,6 +2283,10 @@ pub fn set_field(owner, name, value) {
                 setter(owner, value);
                 return ();
             }
+        }
+        if name == "instance_count" && owner.contains_key("__multimesh") {
+            multimesh_count(owner, value);
+            return ();
         }
         owner[name] = value;
     }
@@ -2090,4 +2354,307 @@ pub fn type_of(value) {
         return "Dictionary";
     }
     return "Object";
+}
+
+/// `Performance.get_monitor`, by the ids `map.rs` gives the names: frame
+/// time and node counts from the engine, memory and draw calls as zero.
+pub fn monitor(id) {
+    let id = int(id);
+    if id == 0 {
+        let frame = engine::timings().frame;
+        if frame > 0.0 {
+            return 1.0 / frame;
+        }
+        return 0.0;
+    }
+    if id == 1 || id == 2 {
+        return engine::timings().frame;
+    }
+    if id == 7 || id == 9 {
+        return scene::root().descendants().len() + 1;
+    }
+    return 0;
+}
+
+/// `DirAccess.open`: the directory's entries behind Godot's verbs, read
+/// once when opened.
+pub fn dir_open(path) {
+    let entries = fs::list(project_path(path));
+    let dir = #{ "__at": 0, "__last": () };
+    dir["get_files"] = || {
+        let out = [];
+        for entry in entries {
+            if !entry.is_dir {
+                out.push(entry.name);
+            }
+        }
+        return out;
+    };
+    dir["get_directories"] = || {
+        let out = [];
+        for entry in entries {
+            if entry.is_dir {
+                out.push(entry.name);
+            }
+        }
+        return out;
+    };
+    dir["list_dir_begin"] = || {
+        dir["__at"] = 0;
+        return 0;
+    };
+    dir["list_dir_end"] = || ();
+    dir["get_next"] = || {
+        let at = dir["__at"];
+        if at >= entries.len() {
+            dir["__last"] = ();
+            return "";
+        }
+        dir["__at"] = at + 1;
+        dir["__last"] = entries[at];
+        return entries[at].name;
+    };
+    dir["current_is_dir"] = || {
+        let last = dir["__last"];
+        if is_nil(last) {
+            return false;
+        }
+        return last.is_dir;
+    };
+    dir
+}
+
+/// Godot's `get_node_or_null(path)`: nothing for no path, the node for a
+/// node, and the node at the path otherwise.
+pub fn node_at(owner, path) {
+    if path is balaur::Node {
+        return path;
+    }
+    if !(path is String) || path == "" || !(owner is balaur::Node) {
+        return ();
+    }
+    return owner.get_node(path);
+}
+
+const EVENT_KEY = "__event";
+const INPUT_HANDLED = "input:handled";
+
+/// Which of Godot's event classes a hook's event stands for. A finger is a
+/// click here, so a pointer event is Godot's touch as well as its mouse.
+fn event_classes(kind) {
+    if kind == "InputEventKey" {
+        return ["InputEvent", "InputEventWithModifiers", "InputEventKey"];
+    }
+    if kind == "InputEventMouseButton" {
+        return ["InputEvent", "InputEventWithModifiers", "InputEventMouse", "InputEventMouseButton", "InputEventScreenTouch"];
+    }
+    if kind == "InputEventMouseMotion" {
+        return ["InputEvent", "InputEventWithModifiers", "InputEventMouse", "InputEventMouseMotion", "InputEventScreenDrag"];
+    }
+    return ["InputEvent"];
+}
+
+pub fn event_is(event, name) {
+    return event_classes(event[EVENT_KEY]).iter().any(|class| class == name);
+}
+
+/// Godot's verbs on an event, as closures over the table.
+fn event_verbs(event) {
+    event["is_action_pressed"] = |name| event["pressed"] && input::action_just_pressed(name);
+    event["is_action_released"] = |name| !event["pressed"] && input::action_just_released(name);
+    event["is_action"] = |name| input::action_just_pressed(name) || input::action_just_released(name);
+    event["is_pressed"] = || event["pressed"];
+    event["is_released"] = || !event["pressed"];
+    event["is_echo"] = || false;
+    event["is_canceled"] = || false;
+    event["get_position"] = || event["position"];
+    event["get_global_position"] = || event["global_position"];
+    event["as_text"] = || str(event[EVENT_KEY]);
+}
+
+/// The code point the keyboard typed this frame, for Godot's `unicode`.
+fn typed_code() {
+    let typed = input::typed();
+    if !(typed is String) || typed.len() == 0 {
+        return 0;
+    }
+    match typed.chars().next() {
+        Some(c) => return char::to_i64(c),
+        None => return 0,
+    }
+}
+
+/// A key hook's event: Godot's `InputEventKey`. A key is named as the
+/// engine names it, which `KEY_*` spells the same way.
+pub fn key_event(key, pressed) {
+    let event = #{
+        "__event": "InputEventKey",
+        "keycode": key,
+        "physical_keycode": key,
+        "key_label": key,
+        "pressed": pressed,
+        "echo": false,
+        "unicode": typed_code(),
+        "shift_pressed": false,
+        "ctrl_pressed": false,
+        "alt_pressed": false,
+        "meta_pressed": false,
+    };
+    event_verbs(event);
+    return event;
+}
+
+/// Godot numbers the buttons from one; the engine names them.
+fn button_index(button) {
+    if button == "right" {
+        return 2;
+    }
+    if button == "middle" {
+        return 3;
+    }
+    return 1;
+}
+
+/// A pointer hook's event: Godot's `InputEventMouseButton`, and its touch.
+pub fn pointer_event(button, pressed) {
+    let at = vec_of(input::mouse_position());
+    let event = #{
+        "__event": "InputEventMouseButton",
+        "button_index": button_index(button),
+        "pressed": pressed,
+        "position": at,
+        "global_position": at,
+        "double_click": false,
+        "factor": 1.0,
+        "index": 0,
+        "button_mask": if pressed { 1 } else { 0 },
+    };
+    event_verbs(event);
+    return event;
+}
+
+/// A drag hook's event: Godot's `InputEventMouseMotion` with a button held.
+pub fn motion_event(dx, dy) {
+    let at = vec_of(input::mouse_position());
+    let event = #{
+        "__event": "InputEventMouseMotion",
+        "relative": vec2(dx, dy),
+        "velocity": vec2(dx, dy),
+        "position": at,
+        "global_position": at,
+        "pressed": true,
+        "index": 0,
+        "button_mask": 1,
+    };
+    event_verbs(event);
+    return event;
+}
+
+/// A scroll hook's event: Godot's wheel buttons, 4 up and 5 down.
+pub fn scroll_event(dx, dy) {
+    let at = vec_of(input::mouse_position());
+    let event = #{
+        "__event": "InputEventMouseButton",
+        "button_index": if dy > 0.0 { 4 } else { 5 },
+        "pressed": true,
+        "position": at,
+        "global_position": at,
+        "double_click": false,
+        "factor": math::abs(dy),
+        "index": 0,
+        "button_mask": 0,
+    };
+    event_verbs(event);
+    return event;
+}
+
+/// Godot's `set_input_as_handled` and `accept_event`: the hook that called
+/// the handler answers it, and the engine stops the broadcast there.
+pub fn set_input_handled() {
+    script::store(INPUT_HANDLED, true);
+}
+
+pub fn input_handled() {
+    let held = script::stored(INPUT_HANDLED);
+    return held is bool && held;
+}
+
+pub fn take_input_handled() {
+    let held = input_handled();
+    script::store(INPUT_HANDLED, false);
+    return held;
+}
+
+const WIDGET_BOUND = "widget:bound:";
+
+/// Godot's `Signal` as a value, `button.pressed` handed to a function: a
+/// record whose `connect`, `is_connected` and `disconnect` reach the widget
+/// key when `key` names one, and the node's handlers otherwise. A one-shot
+/// flag is not kept: the caller disconnects.
+pub fn signal_value(node, name, key) {
+    let sig = #{ "__signal": name, "node": node, "key": key };
+    sig["connect"] = |f| signal_connect(sig, f);
+    sig["connect/2"] = |f, flags| signal_connect(sig, f);
+    sig["is_connected"] = |f| signal_connected(sig);
+    sig["disconnect"] = |f| signal_disconnect(sig);
+    sig
+}
+
+fn signal_connect(sig, f) {
+    if sig["key"] == "" {
+        return connect(sig["node"], sig["__signal"], f);
+    }
+    widget_bind(sig["node"], sig["key"], f)
+}
+
+fn signal_connected(sig) {
+    let node = sig["node"];
+    if !(node is balaur::Node) {
+        return false;
+    }
+    if sig["key"] == "" {
+        return is_connected(node, sig["__signal"]);
+    }
+    let list = script::stored(`${WIDGET_BOUND}${node.stable_id()}:${sig["key"]}`);
+    list is Vec && list.len() > 0
+}
+
+fn signal_disconnect(sig) {
+    let node = sig["node"];
+    if !(node is balaur::Node) {
+        return ();
+    }
+    if sig["key"] == "" {
+        return disconnect(node, sig["__signal"]);
+    }
+    script::store(`${WIDGET_BOUND}${node.stable_id()}:${sig["key"]}`, []);
+}
+
+/// A widget signal's handler that is no method here, a `.bind` or a lambda:
+/// the widget calls the class's forwarder with its node, which finds it.
+pub fn widget_bind(node, key, handler) {
+    if !(node is balaur::Node) {
+        return ();
+    }
+    let patch = #{ "pass_node": true };
+    patch[key] = `__widget_${key}`;
+    node.patch_component("widget", patch);
+    let store_key = `${WIDGET_BOUND}${node.stable_id()}:${key}`;
+    let list = script::stored(store_key);
+    if !(list is Vec) {
+        list = [];
+    }
+    list.push(handler);
+    script::store(store_key, list);
+    return ();
+}
+
+pub fn widget_fire(node, key, args) {
+    let list = script::stored(`${WIDGET_BOUND}${node.stable_id()}:${key}`);
+    if list is Vec {
+        for f in list {
+            call_value(f, args);
+        }
+    }
+    return ();
 }

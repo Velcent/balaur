@@ -38,7 +38,12 @@ impl Walk {
         let document =
             super::parse(&text).with_context(|| format!("reading {}", file.display()))?;
         let uids = super::project::uid_index(&root);
-        let converted = super::project::convert(&document, &uids)?;
+        let ignore = super::io::text(&root.join("export_presets.cfg"))
+            .ok()
+            .and_then(|text| super::parse(&text).ok())
+            .map(|presets| super::project::shared_exclusions(&presets))
+            .unwrap_or_default();
+        let converted = super::project::convert(&document, &uids, &ignore)?;
 
         let mut report = Report::default();
         let mut sink = ProjectSink::new(project);
@@ -50,7 +55,40 @@ impl Walk {
             super::files::copy_font(&root, &mut sink, &font)?;
         }
         let files = walk(&root);
-        let lookups = super::files::lookups(&root, &files, uids, &mut sink, &mut report)?;
+        let mut lookups = super::files::lookups(&root, &files, uids, &mut sink, &mut report)?;
+        // An autoload is a node under the main scene's root here, first in
+        // order, so it is there before anything else runs.
+        lookups.main_scene = document
+            .first("application")
+            .and_then(|s| s.field("run/main_scene"))
+            .and_then(super::Value::as_str)
+            .map(|p| match lookups.uids.get(p) {
+                // Godot 4.4 names the scene by its uid.
+                Some(path) => path.clone(),
+                None => p.strip_prefix("res://").unwrap_or(p).to_string(),
+            })
+            .unwrap_or_default();
+        for section in document.each("autoload") {
+            for (name, value) in &section.fields {
+                let Some(path) = value.as_str() else {
+                    continue;
+                };
+                let path = path.trim_start_matches('*');
+                let path = path.strip_prefix("res://").unwrap_or(path);
+                let Some(stem) = path.strip_suffix(".gd") else {
+                    continue;
+                };
+                // Static functions and constants alone need no node: the name
+                // reads the translated module, as a `class_name` does.
+                let source = super::io::text(&root.join(path)).unwrap_or_default();
+                if super::script::code_only(&source) {
+                    lookups.classes.files.insert(name.clone(), path.to_string());
+                    continue;
+                }
+                lookups.autoloads.push((name.clone(), format!("{stem}.rn")));
+                lookups.classes.autoload_nodes.insert(name.clone());
+            }
+        }
         Ok(Self {
             root,
             files,
@@ -106,13 +144,7 @@ impl Walk {
             let converted = super::script::convert(&source, &relative, &self.lookups.classes);
             let target = format!("{}.rn", relative.trim_end_matches(".gd"));
             self.sink.put(&target, converted.rune.as_bytes())?;
-            for (name, inner) in super::script::inner_classes(&source) {
-                let file = super::script::inner_file(&relative, &name);
-                let module = super::script::convert(&inner, &file, &self.lookups.classes);
-                self.sink
-                    .put(&file.replace(".gd", ".rn"), module.rune.as_bytes())?;
-                self.report.section(&file, module.notes);
-            }
+            self.write_inner_scripts(&source, &relative)?;
             self.scripts += 1;
             self.report.section(&relative, converted.notes);
         } else if extension == "tres" {
@@ -127,6 +159,20 @@ impl Walk {
             // gathers in memory on its way across.
             let bytes = super::io::bytes(&self.root.join(&relative))?;
             self.sink.put(&relative, &bytes)?;
+        }
+        Ok(())
+    }
+
+    /// Each inner class as a script of its own, and the classes inside it
+    /// under it in turn.
+    fn write_inner_scripts(&mut self, source: &str, file: &str) -> Result<()> {
+        for (name, inner) in super::script::inner_scripts(source, file) {
+            let path = super::script::inner_file(file, &name);
+            let module = super::script::convert(&inner, &path, &self.lookups.classes);
+            self.sink
+                .put(&path.replace(".gd", ".rn"), module.rune.as_bytes())?;
+            self.report.section(&path, module.notes);
+            self.write_inner_scripts(&inner, &path)?;
         }
         Ok(())
     }

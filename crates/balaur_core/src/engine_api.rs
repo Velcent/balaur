@@ -14,7 +14,7 @@ use balaur_script::{Bindings as _, Value};
 use crate::batteries_api::{
     assets_assign_id, assets_directory, assets_duplicate, assets_exists, assets_id,
     assets_invalidate, assets_load, assets_path, assets_reload, assets_rename, assets_save,
-    dark_mode, device_id, encoding_base64, encoding_from_base64, focused, hash_sha256,
+    dark_mode, device_id, encoding_base64, encoding_from_base64, environment, focused, hash_sha256,
     hash_sha256_text, log_clear, log_error, log_file, log_info, log_recent, log_since, log_warn,
     platform, rng_int, rng_random, rng_range, rng_seed, rng_uuid, scene_tagged,
     strings_system_locale, unix_time,
@@ -23,6 +23,9 @@ use crate::engine::Engine;
 use crate::file_api::{
     fs_copy, fs_exists, fs_list, fs_mkdir, fs_mtime, fs_read, fs_remove, fs_rename, fs_write,
     json_encode, json_parse, toml_encode, toml_parse, toml_patch,
+};
+use crate::regex_api::{
+    regex_escape, regex_matches, regex_replace, regex_search, regex_search_all, regex_split,
 };
 use crate::scene;
 
@@ -89,6 +92,11 @@ pub const ENGINE_OPS: &[EngineOp] = &[
         module: "engine",
         name: "args",
         call: args,
+    },
+    EngineOp {
+        module: "engine",
+        name: "environment",
+        call: environment,
     },
     EngineOp {
         module: "engine",
@@ -289,6 +297,36 @@ pub const ENGINE_OPS: &[EngineOp] = &[
         module: "engine",
         name: "user_data_dir_of",
         call: user_data_dir_of_project,
+    },
+    EngineOp {
+        module: "regex",
+        name: "matches",
+        call: regex_matches,
+    },
+    EngineOp {
+        module: "regex",
+        name: "search",
+        call: regex_search,
+    },
+    EngineOp {
+        module: "regex",
+        name: "search_all",
+        call: regex_search_all,
+    },
+    EngineOp {
+        module: "regex",
+        name: "replace",
+        call: regex_replace,
+    },
+    EngineOp {
+        module: "regex",
+        name: "split",
+        call: regex_split,
+    },
+    EngineOp {
+        module: "regex",
+        name: "escape",
+        call: regex_escape,
     },
     EngineOp {
         module: "strings",
@@ -621,6 +659,7 @@ fn document(module: &str, m: &mut dyn balaur_script::Bindings<Engine>) {
         "log" => crate::engine_docs::document_log(m),
         "save" => crate::engine_docs::document_save(m),
         "strings" => crate::engine_docs::document_strings(m),
+        "regex" => crate::engine_docs::document_regex(m),
         "rng" => crate::engine_docs::document_rng(m),
         "fs" => crate::engine_docs::document_fs(m),
         "toml" => crate::engine_docs::document_toml(m),

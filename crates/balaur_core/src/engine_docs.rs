@@ -22,6 +22,7 @@ pub(crate) fn document_engine(m: &mut dyn balaur_script::Bindings<Engine>) {
         ("tick_hz", &[], "()", "How many fixed steps a second this run takes, from `[time] tick_hz`. 60 unless the project says otherwise."),
         ("quit", &[], "(code: int?)", "Ask the app to shut down; the frame in flight still finishes, and the process exits with `code`, 0 when left out."),
         ("args", &[], "()", "The command-line arguments the app was started with, empty when it was given none."),
+        ("environment", &[], "(name: string) -> string?", "An environment variable's value, nil when it is unset. Nil on the web, which has none. Outside the simulation, like `args`: a replay does not record it."),
         ("reload_script", &[], "(key: string)", "Recompile one script by its project-relative key, for a tool editing files outside the watched root."),
         ("user_data_dir", &[], "()", "A writable per-user directory for saves and settings, created on first call and named after the project."),
         ("user_data_dir_of", &[], "(project: string)", "The user data directory a project of that name has, not created: where a tool finds another game's saves and logs."),
@@ -121,6 +122,20 @@ pub(crate) fn document_assets(m: &mut dyn balaur_script::Bindings<Engine>) {
         ("id", &[], "(path: string) -> string?", "The id `assets/index.toml` gives a file, or nil when it has none."),
         ("assign_id", &[], "(path: string) -> string", "The id a file has, giving it one if it has none: a digest of the path and content, written to `assets/index.toml` and, for an asset document, as its top-level `id`. Reference it as `id://<id>` afterwards."),
         ("path", &[], "(reference: string) -> string", "The path an `id://` reference resolves to in the running project; a path comes back as itself, and an unknown id is an error naming the index."),
+    ]);
+}
+
+pub(crate) fn document_regex(m: &mut dyn balaur_script::Bindings<Engine>) {
+    m.module_doc(
+        "Regular expressions, the `regex-lite` dialect: no look-around or back-references. A pattern is compiled on every call; a match is `#{ start, end, text, groups }` with byte offsets and one string per capture group, nil for a group that took no part.",
+    );
+    m.describe(&[
+        ("matches", &[], "(pattern: string, text: string) -> bool", "Whether the pattern matches anywhere in `text`."),
+        ("search", &[], "(pattern: string, text: string) -> table?", "The first match, or nil."),
+        ("search_all", &[], "(pattern: string, text: string) -> [table]", "Every non-overlapping match, in order."),
+        ("replace", &[], "(pattern: string, text: string, with: string, all: bool?) -> string", "`text` with the first match replaced, or every match when `all` is true; `$1` and `${name}` in `with` stand for groups."),
+        ("split", &[], "(pattern: string, text: string) -> [string]", "The pieces of `text` between matches."),
+        ("escape", &[], "(text: string) -> string", "`text` with every metacharacter escaped, so it matches itself."),
     ]);
 }
 

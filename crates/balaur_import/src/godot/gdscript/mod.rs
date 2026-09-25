@@ -8,7 +8,7 @@
 
 mod ast;
 mod emit;
-mod lex;
+pub(crate) mod lex;
 mod map;
 mod parse;
 mod shim;
@@ -35,6 +35,8 @@ pub(crate) struct Body {
     /// made: the engine calls `on_<name>`, so the module needs one that
     /// forwards to the handler Godot named.
     pub forwarders: std::collections::BTreeMap<String, (String, bool)>,
+    /// Widget keys whose handlers the class forwards by node.
+    pub widget_forwarders: std::collections::BTreeSet<String>,
 }
 
 /// Translate the lines of one function body, already stripped of its
@@ -58,6 +60,7 @@ pub(crate) fn body(
                 notes: vec![format!("{reason}; the body is kept as a comment")],
                 uses_shim: false,
                 forwarders: std::collections::BTreeMap::new(),
+                widget_forwarders: std::collections::BTreeSet::new(),
             };
         }
     };
@@ -69,12 +72,16 @@ pub(crate) fn body(
     for param in params {
         emitter.declare(param);
     }
+    if let Some(strings) = context.string_params.get(enclosing) {
+        emitter.string_locals.extend(strings.iter().cloned());
+    }
     let rune = emitter.block(&statements, depth);
     Body {
         rune,
         notes: emitter.notes,
         uses_shim: emitter.uses_shim,
         forwarders: emitter.forwarders,
+        widget_forwarders: emitter.widget_forwarders,
     }
 }
 
@@ -101,6 +108,19 @@ pub(crate) fn called(lines: &[String], names: &BTreeSet<String>) -> BTreeSet<Str
             continue;
         };
         if pair[1].kind == lex::Tok::Op("(") && names.contains(name) {
+            out.insert(name.clone());
+        }
+    }
+    // `name.call_deferred(..)` and `name.call(..)` call `name` as surely.
+    for four in tokens.windows(4) {
+        let (lex::Tok::Name(name), lex::Tok::Name(verb)) = (&four[0].kind, &four[2].kind) else {
+            continue;
+        };
+        if four[1].kind == lex::Tok::Op(".")
+            && four[3].kind == lex::Tok::Op("(")
+            && (verb == "call" || verb == "call_deferred")
+            && names.contains(name)
+        {
             out.insert(name.clone());
         }
     }
@@ -194,6 +214,33 @@ mod tests {
         let out = translate("sink(2)\nself.repair()\n", &ship());
         assert!(out.contains("sink(this, 2);"), "{out}");
         assert!(out.contains("repair(this);"), "{out}");
+    }
+
+    #[test]
+    fn a_singleton_call_reaches_the_engine_module_behind_it() {
+        let source = [
+            "var fps = Performance.get_monitor(Performance.TIME_FPS)",
+            "var inside = Geometry2D.is_point_in_polygon(speed, hull)",
+            "var text = String(speed)",
+            "var letter = char(65)",
+            "var table = typeof(hull) == TYPE_DICTIONARY",
+            "var kids = get_child_count()",
+            "DisplayServer.screen_set_keep_on(true)",
+            "",
+        ]
+        .join("\n");
+        let out = translate(&source, &ship());
+        for line in [
+            "let fps = (gd.monitor)(0);",
+            "let inside = geometry2d::contains(this.hull, this.speed);",
+            "let text = (gd.str)(this.speed);",
+            "let letter = (gd.chr)(65);",
+            "\"Dictionary\"",
+            "let kids = this.node.children().len();",
+            "window::set_keep_awake(true);",
+        ] {
+            assert!(out.contains(line), "{line}\n{out}");
+        }
     }
 
     #[test]

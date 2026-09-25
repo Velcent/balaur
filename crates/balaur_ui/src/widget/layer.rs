@@ -14,8 +14,8 @@ use crate::widget::arrange::{
     Axis, contain, hold_to, lay_out, padding_of, record_measure, record_rect, roll_measurements,
     scroller, settle_rects, solved_of, tabs,
 };
-use crate::widget::node::{Move, Surface, UiFocus, Widget, WidgetLayerConfig};
-use crate::widget::theme::{Style, WidgetTheme, face, styled, theme_of};
+use crate::widget::node::{Move, Surface, UiFocus, UiPointer, Widget, WidgetLayerConfig};
+use crate::widget::theme::{Pointer, Style, WidgetState, WidgetTheme, face, styled, theme_of};
 
 /// Whether focus can land on this widget.
 ///
@@ -187,6 +187,13 @@ fn inside_safe_area(eng: &Engine, area: egui::Rect, edges: [bool; 4]) -> egui::R
     area.intersect(safe)
 }
 
+/// What this pass found under the pointer, for `ui.wants_pointer()`.
+fn publish_pointer(eng: &Engine, found: UiPointer) {
+    if let Some(pointer) = eng.try_resource::<UiPointer>() {
+        *pointer.borrow_mut() = found;
+    }
+}
+
 /// Draw every widget entity. Runs inside the frame's egui pass, after the
 /// scripts' `draw_ui`.
 pub(crate) fn draw(eng: &Engine, ctx: &egui::Context) {
@@ -264,8 +271,9 @@ pub(crate) fn draw(eng: &Engine, ctx: &egui::Context) {
         // An `accept` is a click by another name: same `clicked`, same
         // `on_click`, so it starts the frame's list rather than a second one.
         clicked: accepted.into_iter().chain(fired).collect(),
-        state: (false, false),
+        state: WidgetState::default(),
         context_opened: false,
+        pointer: UiPointer::default(),
     };
     for root in &roots {
         let root = *root;
@@ -295,6 +303,7 @@ pub(crate) fn draw(eng: &Engine, ctx: &egui::Context) {
     crate::widget::taffy::sweep(eng);
     let edits = std::mem::take(&mut painting.edits);
     let clicked = std::mem::take(&mut painting.clicked);
+    publish_pointer(eng, painting.pointer);
     // Dropped before the arena moves: `Painting` borrows it for the draw.
     drop(painting);
     keep(placed, roots, index_of, stamp);
@@ -534,6 +543,8 @@ pub(crate) struct Painting<'a> {
     pub(crate) bounds: egui::Vec2,
     pub(crate) clicked: Vec<Entity>,
     pub(crate) edits: Vec<(Entity, Edit)>,
+    /// What this pass found under the pointer, published for `wants_pointer`.
+    pub(crate) pointer: UiPointer,
     /// Where the layout pass put every widget in the subtree being drawn.
     pub(crate) rects: crate::widget::taffy::Rects,
     /// Whether the arena was rebuilt this pass. False means the tree taffy
@@ -545,7 +556,8 @@ pub(crate) struct Painting<'a> {
     /// Whether the pointer is over the widget being drawn, and whether it is
     /// held there. Set by the draw and never by the measure: a size that
     /// followed the pointer would move whatever sits beside it.
-    pub(crate) state: (bool, bool),
+    /// What the widget being drawn is being, for the theme's state tables.
+    pub(crate) state: WidgetState,
     /// Whether a widget already opened its `context` menu for this pass's
     /// press. Children draw before the parent asks, so the innermost one
     /// under the pointer takes it.
@@ -600,11 +612,14 @@ impl Painting<'_> {
     /// A style with its `hover` or `active` table over it, where the pointer
     /// put the widget in one. A style with neither answers with itself.
     fn in_state(&self, style: Rc<Style>) -> Rc<Style> {
-        let (hovered, held) = self.state;
-        if !(hovered || held) || (style.hover.is_none() && style.active.is_none()) {
+        let plain = style.hover.is_none()
+            && style.active.is_none()
+            && style.disabled.is_none()
+            && style.focus.is_none();
+        if !self.state.any() || plain {
             return style;
         }
-        Rc::new(style.in_state(hovered, held))
+        Rc::new(style.in_states(self.state))
     }
 }
 
@@ -691,7 +706,24 @@ pub(crate) fn caption(eng: &Engine, widget: &Widget) -> SmolStr {
 /// Everything a widget kind draws, with the theme already resolved.
 fn draw_themed(ui: &mut egui::Ui, at: &mut Painting<'_>, index: usize) {
     let disabled = at.arena[index].widget.disabled;
-    let outer = std::mem::replace(&mut at.state, pointer_state(ui, disabled));
+    let focused = at
+        .eng
+        .try_resource::<crate::UiFocus>()
+        .is_some_and(|focus| focus.borrow().focused == Some(at.arena[index].entity));
+    let (hovered, held) = pointer_state(ui, disabled);
+    let pointer = if held {
+        Pointer::Held
+    } else if hovered {
+        Pointer::Over
+    } else {
+        Pointer::Away
+    };
+    let state = WidgetState {
+        pointer,
+        disabled,
+        focused,
+    };
+    let outer = std::mem::replace(&mut at.state, state);
     crate::widget::kinds::context_sensor(ui, at, index);
     draw_kind(ui, at, index);
     crate::widget::kinds::context_menu(ui, at, index);
@@ -714,7 +746,8 @@ fn draw_kind(ui: &mut egui::Ui, at: &mut Painting<'_>, index: usize) {
     let caption = caption(at.eng, widget);
     let look = at.look(index);
     let (color, font) = (look.ink, look.font.clone());
-    let (tooltip, entity) = (widget.tooltip.clone(), placed.entity);
+    let (tooltip, cursor, entity) = (widget.tooltip.clone(), widget.cursor.clone(), placed.entity);
+    let through = widget.pointer_through;
     if widget.disabled {
         ui.disable();
     }
@@ -825,6 +858,63 @@ fn draw_kind(ui: &mut egui::Ui, at: &mut Painting<'_>, index: usize) {
         }
     }
     tip(ui, entity, &tooltip);
+    under_pointer(ui, at, &cursor, through);
+}
+
+/// What the pointer meets over the widget just drawn: the widget's `cursor`
+/// shape, and whether it takes the pointer or lets it through.
+fn under_pointer(ui: &egui::Ui, at: &mut Painting<'_>, cursor: &str, through: bool) {
+    if !ui.rect_contains_pointer(ui.min_rect()) {
+        return;
+    }
+    at.pointer.over = true;
+    at.pointer.claimed |= !through;
+    if let Some(icon) = pointer_icon(cursor) {
+        ui.ctx().set_cursor_icon(icon);
+    }
+}
+
+/// The platform pointer a `cursor` word names; the arrow is what the pointer
+/// already is, and an unknown word is nothing.
+pub(crate) fn pointer_icon(cursor: &str) -> Option<egui::CursorIcon> {
+    use crate::vocabulary::words::cursor as c;
+    use egui::CursorIcon as C;
+    Some(match cursor {
+        c::HAND => C::PointingHand,
+        c::TEXT => C::Text,
+        c::VERTICAL_TEXT => C::VerticalText,
+        c::CROSS => C::Crosshair,
+        c::CELL => C::Cell,
+        c::WAIT => C::Wait,
+        c::PROGRESS => C::Progress,
+        c::HELP => C::Help,
+        c::CONTEXT_MENU => C::ContextMenu,
+        c::MOVE => C::Move,
+        c::GRAB => C::Grab,
+        c::GRABBING => C::Grabbing,
+        c::ALIAS => C::Alias,
+        c::COPY => C::Copy,
+        c::NO_DROP => C::NoDrop,
+        c::FORBIDDEN => C::NotAllowed,
+        c::ALL_SCROLL => C::AllScroll,
+        c::RESIZE_X => C::ResizeHorizontal,
+        c::RESIZE_Y => C::ResizeVertical,
+        c::RESIZE_N => C::ResizeNorth,
+        c::RESIZE_E => C::ResizeEast,
+        c::RESIZE_S => C::ResizeSouth,
+        c::RESIZE_W => C::ResizeWest,
+        c::RESIZE_NE => C::ResizeNorthEast,
+        c::RESIZE_NW => C::ResizeNorthWest,
+        c::RESIZE_SE => C::ResizeSouthEast,
+        c::RESIZE_SW => C::ResizeSouthWest,
+        c::RESIZE_NESW => C::ResizeNeSw,
+        c::RESIZE_NWSE => C::ResizeNwSe,
+        c::RESIZE_COL => C::ResizeColumn,
+        c::RESIZE_ROW => C::ResizeRow,
+        c::ZOOM_IN => C::ZoomIn,
+        c::ZOOM_OUT => C::ZoomOut,
+        _ => return None,
+    })
 }
 
 /// Hover text over whatever the kind just drew, from the rect it took.
@@ -1008,5 +1098,40 @@ fn image(ui: &mut egui::Ui, at: &mut Painting<'_>, index: usize) {
 fn warn_once(source: &str, err: &anyhow::Error) {
     if balaur_core::logbuf::first_time("widget image", source) {
         tracing::warn!("widget image '{source}': {err:#}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_ui_wants_the_pointer_unless_every_widget_under_it_lets_it_through() {
+        let nothing = UiPointer::default();
+        assert!(nothing.wants(true), "an egui panel with no widget under it");
+        assert!(!nothing.wants(false));
+        let through = UiPointer {
+            over: true,
+            claimed: false,
+        };
+        assert!(!through.wants(true), "only pass-through widgets under it");
+        let taken = UiPointer {
+            over: true,
+            claimed: true,
+        };
+        assert!(taken.wants(true), "a button inside a pass-through root");
+    }
+
+    #[test]
+    fn every_cursor_word_names_a_pointer_and_no_word_names_none() {
+        for word in w::cursor::ALL {
+            assert_eq!(
+                pointer_icon(word).is_some(),
+                *word != w::cursor::ARROW,
+                "{word}"
+            );
+        }
+        assert_eq!(pointer_icon(""), None);
+        assert_eq!(pointer_icon("banana"), None);
     }
 }

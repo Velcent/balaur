@@ -33,11 +33,41 @@ impl Emitter<'_> {
     /// `x.signal.connect(self._handler)`: a widget key for a widget's own
     /// signal, an event subscription for any other. Only a plain method name
     /// is taken as the handler; a lambda or `.bind(..)` is reported instead.
+    /// A handler that is not a method here, connected: a widget's signal
+    /// calls a method by name, so the class gains a forwarder that finds the
+    /// handler by the widget's node; any other signal takes the value.
+    fn connect_value(
+        &mut self,
+        verb: &str,
+        object: &Expr,
+        signal: &str,
+        handler: &Expr,
+    ) -> Option<String> {
+        let widget = map::widget_signal(signal);
+        if verb != "connect" || (widget.is_none() && map::ENGINE_SIGNALS.contains(&signal)) {
+            return None;
+        }
+        let receiver = self.expression(object);
+        let handler = self.argument("connect", handler);
+        self.uses_shim = true;
+        if let Some(key) = widget {
+            self.widget_forwarders.insert(key.to_string());
+            return Some(format!(
+                "(gd.widget_bind)({receiver}, {}, {handler})",
+                quoted(key)
+            ));
+        }
+        Some(format!(
+            "(gd.connect)({receiver}, {}, {handler})",
+            quoted(signal)
+        ))
+    }
+
     pub(super) fn widget_connection(&mut self, callee: &Expr, args: &[Expr]) -> Option<String> {
         let Expr::Field(inner, verb) = callee else {
             return None;
         };
-        if verb != "connect" && verb != "disconnect" {
+        if verb != "connect" && verb != "disconnect" && verb != "is_connected" {
             return None;
         }
         // `button.pressed.connect(..)`, and the bare `pressed.connect(..)`
@@ -79,7 +109,10 @@ impl Emitter<'_> {
                 Some(name.clone())
             }
             None => None,
-            _ => return None,
+            // A handler that is not a method here: a `Callable` held in a
+            // variable, a lambda, another node's method. A script signal
+            // takes it as a value; a widget's or the engine's needs a name.
+            Some(other) => return self.connect_value(verb, &object, &signal, other),
         };
         let handler = if verb == "disconnect" {
             None
@@ -88,6 +121,17 @@ impl Emitter<'_> {
         };
         let handler = handler.map(|name| self.method_name(&name));
         let receiver = self.expression(&object);
+        if verb == "is_connected" {
+            self.uses_shim = true;
+            return Some(match map::widget_signal(&signal) {
+                Some(key) => format!(
+                    "(gd.widget_connected)({receiver}, {}, {})",
+                    quoted(key),
+                    quoted(handler.as_deref().unwrap_or(""))
+                ),
+                None => format!("(gd.is_connected)({receiver}, {})", quoted(&signal)),
+            });
+        }
         // A widget's own signal is a key on the widget: the engine calls it on
         // the first ancestor whose script has the method, as the connect meant.
         if let Some(key) = map::widget_signal(&signal) {
@@ -101,10 +145,15 @@ impl Emitter<'_> {
             return Some(map::signal_unsubscribe(&receiver, &signal));
         }
         let handler = handler?;
-        // A handler is called with what the signal carries, whatever its own
-        // defaulted tail says it could take.
-        self.wanted_args = self.context.signal_arity.get(&signal).copied();
-        let closure = self.callable(args.first()?);
+        // Only this class's own signal says how many values it carries;
+        // another class may declare the name with a different count.
+        self.wanted_args = self
+            .context
+            .signal_arity
+            .get(&signal)
+            .copied()
+            .filter(|_| self.context.signals.contains(&signal));
+        let closure = self.connect_handler(args.first()?);
         self.wanted_args = None;
         let closure = closure?;
         // Godot's `hidden` is the engine's visibility event, heard only when
@@ -123,8 +172,24 @@ impl Emitter<'_> {
     /// this class as a call on `this`, and `.bind(..)` with its arguments
     /// taken now, as Godot takes them.
     pub(super) fn callable(&mut self, handler: &Expr) -> Option<String> {
+        self.callable_parts(handler).map(|(text, _)| text)
+    }
+
+    /// A handler for `connect`: the closure with how many arguments it takes,
+    /// so the shim fits a signal's payload to it, as Godot fitted defaults.
+    pub(super) fn connect_handler(&mut self, handler: &Expr) -> Option<String> {
+        let (text, takes) = self.callable_parts(handler)?;
+        Some(match takes {
+            Some(takes) => format!("#{{ \"__call\": {text}, \"__takes\": {takes} }}"),
+            None => text,
+        })
+    }
+
+    /// A callable's closure, and the arguments it takes where that is known:
+    /// a lambda's count is its own.
+    fn callable_parts(&mut self, handler: &Expr) -> Option<(String, Option<usize>)> {
         if matches!(handler, Expr::Lambda { .. }) {
-            return Some(self.expression(handler));
+            return Some((self.expression(handler), None));
         }
         let (target, bound) = match handler {
             Expr::Call(callee, bound) => match &**callee {
@@ -133,6 +198,13 @@ impl Emitter<'_> {
             },
             other => (other, &[][..]),
         };
+        if let Expr::Name(name) = target
+            && bound.is_empty()
+            && !self.is_local(name)
+            && self.context.statics.contains(name)
+        {
+            return Some(self.static_callable(name));
+        }
         if self.in_static {
             return None;
         }
@@ -144,7 +216,7 @@ impl Emitter<'_> {
             && let Some(text) = map::implicit_self(verb, &[])
         {
             let text = self.shimmed(text);
-            return Some(format!("|| {{ {text}; }}"));
+            return Some((format!("|| {{ {text}; }}"), Some(0)));
         }
         let name = self.own_method(target)?;
         let mut names = vec!["this".to_string()];
@@ -196,10 +268,12 @@ impl Emitter<'_> {
             let mut args = vec![quoted(&method)];
             args.extend(names.iter().skip(1).cloned());
             let call = format!("this.node.call_async({})", args.join(", "));
-            return Some(format!("{{ {lets}|{}| {{ {call} }} }}", open.join(", ")));
+            let text = format!("{{ {lets}|{}| {{ {call} }} }}", open.join(", "));
+            return Some((text, Some(open.len())));
         }
         let call = format!("{method}({})", names.join(", "));
-        Some(format!("{{ {lets}|{}| {{ {call} }} }}", open.join(", ")))
+        let text = format!("{{ {lets}|{}| {{ {call} }} }}", open.join(", "));
+        Some((text, Some(open.len())))
     }
 
     /// `await sig`, `await node.sig` and `await get_tree().create_timer(t).timeout`:
@@ -207,6 +281,13 @@ impl Emitter<'_> {
     pub(super) fn awaited_signal(&mut self, inner: &Expr) -> Option<String> {
         if !self.allow_await {
             return None;
+        }
+        // A `SceneTree` script awaits its own frame signals bare.
+        if let Expr::Name(name) = inner
+            && matches!(name.as_str(), "process_frame" | "physics_frame")
+            && !self.is_local(name)
+        {
+            return Some("task::frames(1).await".into());
         }
         if let Some(signal) = self.signal_of(inner) {
             return Some(format!(
@@ -229,6 +310,16 @@ impl Emitter<'_> {
     }
 
     /// The name of a method of this class that `target` refers to.
+    /// A static function handed over as a callable: a closure over the
+    /// arguments it declares.
+    fn static_callable(&self, name: &str) -> (String, Option<usize>) {
+        let method = self.method_name(name);
+        let takes = self.context.arity.get(&method).copied().unwrap_or(0);
+        let params: Vec<String> = (0..takes).map(|i| format!("a{i}")).collect();
+        let list = params.join(", ");
+        (format!("|{list}| {method}({list})"), Some(takes))
+    }
+
     pub(super) fn own_method(&self, target: &Expr) -> Option<String> {
         let name = match target {
             Expr::Name(name) if !self.is_local(name) => name,

@@ -1340,17 +1340,18 @@ On a node carrying `ragdoll`, as `node.ragdoll.<method>`:
 
 ### `cloner`
 
-`render` · 8 properties · 1 method
+`render` · 9 properties · 2 methods
 
-Draws the node's subtree many times; physics and scripts still see one node. `mode` is `linear`, `radial` or `grid`; `seed` and `random` scatter the copies.
+Draws the node's subtree many times; physics and scripts still see one node. `mode` is `linear`, `radial` or `grid`, or `list` for the `copies` a scene or a script places and tints one by one; `seed` and `random` scatter the copies.
 
 <table>
 <thead><tr><th>property</th><th>type</th><th>default</th><th>description</th></tr></thead>
 <tbody>
 <tr><td><code>angle</code></td><td>float</td><td><code>0.0</code></td><td>Degrees between copies on a ring; zero closes the ring evenly</td></tr>
+<tr><td><code>copies</code></td><td>list of record · <code>position, rotation_euler, scale, tint</code></td><td><code>[]</code></td><td>The copies, when mode is list: each placed in the node&#x27;s own space with the transform component&#x27;s keys, and tinted over the node&#x27;s colour. An empty list draws nothing</td></tr>
 <tr><td><code>count</code></td><td>int</td><td><code>4</code></td><td>How many copies, when mode is linear or radial At least 1.</td></tr>
 <tr><td><code>counts</code></td><td>vec3</td><td><code>[3, 1, 3]</code></td><td>How many along each axis, when mode is grid</td></tr>
-<tr><td><code>mode</code></td><td>enum</td><td><code>linear</code></td><td>How the copies are laid out One of <code>linear</code>, <code>radial</code>, <code>grid</code>.</td></tr>
+<tr><td><code>mode</code></td><td>enum</td><td><code>linear</code></td><td>How the copies are laid out One of <code>linear</code>, <code>radial</code>, <code>grid</code>, <code>list</code>.</td></tr>
 <tr><td><code>radius</code></td><td>float</td><td><code>2.0</code></td><td>How far out the ring sits, when mode is radial</td></tr>
 <tr><td><code>random</code></td><td>float</td><td><code>0.0</code></td><td>How far a copy may wander in position, turn and size Range 0.0–1.0.</td></tr>
 <tr><td><code>seed</code></td><td>int</td><td><code>0</code></td><td>The seed the scatter runs off; zero scatters nothing At least 0.</td></tr>
@@ -1364,6 +1365,7 @@ On a node carrying `cloner`, as `node.cloner.<method>`:
 <thead><tr><th>method</th><th>gives</th><th>description</th><th>module</th></tr></thead>
 <tbody>
 <tr><td><code>clonesNodeId</code></td><td><code>Value</code></td><td>Where the node&#x27;s cloner puts each copy, in the node&#x27;s own space, as `#{ position, rotation, scale }`; an empty list when the node has no cloner. What a bake-to-nodes command spawns from.</td><td><code>render</code></td></tr>
+<tr><td><code>set_copy(i64, Value)</code></td><td>—</td><td>Place and tint one listed copy, `#{ position, rotation_euler, scale, tint }`, without writing the whole list: the list grows with plain copies up to `index`. What a script moving every copy each frame calls.</td><td><code>render</code></td></tr>
 </tbody>
 </table>
 
@@ -1521,7 +1523,7 @@ On a node carrying `sound`, as `node.sound.<method>`:
 
 ### `widget`
 
-`ui` · 102 properties
+`ui` · 104 properties
 
 A HUD element drawn every frame: `kind` picks `label`, `button`, `panel` and more, `anchor` places it in design pixels. A button sets `clicked` and calls `on_click`.
 
@@ -1541,6 +1543,7 @@ A HUD element drawn every frame: `kind` picks `label`, `button`, `panel` and mor
 <tr><td><code>columns</code></td><td>int</td><td><code>0</code></td><td>How many children a `grid` puts on each row, and how many cards a `list` flows into; 0 is the kind&#x27;s own, which is two for a grid and one line a row for a list. A `table`&#x27;s columns are its `titles` At least 0.</td></tr>
 <tr><td><code>context</code></td><td>string</td><td>—</td><td>Name of a `menu` node whose rows open at the pointer on a right click or a long press; give that menu `visible = false` to show no button of its own</td></tr>
 <tr><td><code>current_line</code></td><td>int</td><td><code>0</code></td><td>The line a `code` widget fills across its whole width, counting from 1, for the row a debugger is stopped on; 0 fills none At least 0.</td></tr>
+<tr><td><code>cursor</code></td><td>enum</td><td><code>arrow</code></td><td>The pointer&#x27;s shape while it is over the widget: `hand` over anything that opens on a click; `arrow` is the platform&#x27;s own One of <code>arrow</code>, <code>hand</code>, <code>text</code>, <code>vertical_text</code>, <code>cross</code>, <code>cell</code>, <code>wait</code>, <code>progress</code>, <code>help</code>, <code>context_menu</code>, <code>move</code>, <code>grab</code>, <code>grabbing</code>, <code>alias</code>, <code>copy</code>, <code>no_drop</code>, <code>forbidden</code>, <code>all_scroll</code>, <code>resize_x</code>, <code>resize_y</code>, <code>resize_n</code>, <code>resize_e</code>, <code>resize_s</code>, <code>resize_w</code>, <code>resize_ne</code>, <code>resize_nw</code>, <code>resize_se</code>, <code>resize_sw</code>, <code>resize_nesw</code>, <code>resize_nwse</code>, <code>resize_col</code>, <code>resize_row</code>, <code>zoom_in</code>, <code>zoom_out</code>.</td></tr>
 <tr><td><code>deadzone</code></td><td>float</td><td><code>0.0</code></td><td>How far a finger drags a `scroll` before it scrolls, in design pixels, so a tap on a child still lands; 0 scrolls at once At least 0.0.</td></tr>
 <tr><td><code>disabled</code></td><td>bool</td><td><code>false</code></td><td>Grey the widget out and swallow its clicks</td></tr>
 <tr><td><code>draw</code></td><td>string</td><td>—</td><td>What fills a `draw` widget: a script method on this node or the nearest scripted ancestor, or `scripts/file.rn:function` for a free function</td></tr>
@@ -1592,6 +1595,7 @@ A HUD element drawn every frame: `kind` picks `label`, `button`, `panel` and mor
 <tr><td><code>pass_node</code></td><td>bool</td><td><code>false</code></td><td>Hand every handler this widget calls its own node as the last argument, so one method can serve many widgets</td></tr>
 <tr><td><code>placeholder</code></td><td>string</td><td>—</td><td>What a `field` shows while it is empty, and the letter a `drag_value` puts before its number</td></tr>
 <tr><td><code>placement</code></td><td>enum</td><td><code>below</code></td><td>Where a `menu` opens: under its button, above it, at the pointer, or centred on the screen One of <code>below</code>, <code>above</code>, <code>pointer</code>, <code>center</code>.</td></tr>
+<tr><td><code>pointer_through</code></td><td>bool</td><td><code>false</code></td><td>Let the pointer pass through to the scene: the widget is drawn, never hovered or clicked, and `ui.wants_pointer()` stays false over it. A full-screen container over the world wants this</td></tr>
 <tr><td><code>problems</code></td><td>list of string</td><td><code>[]</code></td><td>The lines a `code` widget underlines as errors, counting from 1, each also marked on the inner edge of its gutter</td></tr>
 <tr><td><code>radius</code></td><td>float</td><td><code>-1.0</code></td><td>Corner radius in design pixels; below zero takes the theme&#x27;s own, which for a button is as round as its text is tall</td></tr>
 <tr><td><code>reorderable</code></td><td>bool</td><td><code>false</code></td><td>Let a drag move a row of a `list` or a `tree`. The kind moves nothing itself: it draws where the row would land and calls `on_move`, and the rows are the script&#x27;s to reorder</td></tr>

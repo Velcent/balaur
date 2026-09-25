@@ -515,7 +515,14 @@ impl<'a> Parser<'a> {
                 }
                 loop {
                     let key = self.expression(0)?;
-                    self.consume(&Tok::Op(":"))?;
+                    // `{ name = value }`, Lua's spelling, keys by the name.
+                    let key = match key {
+                        Expr::Name(name) if self.eat(&Tok::Op("=")) => Expr::Str(name),
+                        key => {
+                            self.consume(&Tok::Op(":"))?;
+                            key
+                        }
+                    };
                     let value = self.expression(0)?;
                     pairs.push((key, value));
                     if self.eat(&Tok::Op(",")) {
@@ -625,7 +632,11 @@ impl<'a> Parser<'a> {
     fn end_of_statement(&mut self) -> Option<()> {
         self.eat(&Tok::Op(";"));
         if self.check(&Tok::Newline) || self.at_end() || self.check(&Tok::Dedent) {
-            self.eat(&Tok::Newline);
+            // A one-line lambda's body leaves the line's end to the statement
+            // holding the lambda.
+            if self.inline == 0 {
+                self.eat(&Tok::Newline);
+            }
             return Some(());
         }
         // A lambda whose body was a block ends its statement with that block.
@@ -763,6 +774,54 @@ mod tests {
             "{out:?}"
         );
         assert!(matches!(out.get(2), Some(Stmt::Var { .. })), "{out:?}");
+    }
+
+    #[test]
+    fn a_dictionary_in_lua_spelling_keys_by_the_name() {
+        let out = parse("var events := {\n\tclose = \"phx_close\",\n\tjoin = \"phx_join\"\n}\n");
+        let Some(Stmt::Var {
+            value: Some(Expr::Dict(pairs)),
+            ..
+        }) = out.first()
+        else {
+            panic!("{out:?}");
+        };
+        assert!(
+            matches!(&pairs[0].0, Expr::Str(k) if k == "close"),
+            "{pairs:?}"
+        );
+        assert!(
+            matches!(&pairs[1].1, Expr::Str(v) if v == "phx_join"),
+            "{pairs:?}"
+        );
+    }
+
+    #[test]
+    fn a_typed_lambda_with_a_one_line_body_is_a_lambda() {
+        let out = parse("var forward := func() -> void: gate_released.emit(true)\n");
+        assert!(
+            matches!(
+                out.first(),
+                Some(Stmt::Var {
+                    value: Some(Expr::Lambda { .. }),
+                    ..
+                })
+            ),
+            "{out:?}"
+        );
+        let out = parse(
+            "var forward := func() -> void: gate_released.emit(true)\nwaited.connect(forward, CONNECT_ONE_SHOT)\n",
+        );
+        assert!(
+            matches!(
+                out.first(),
+                Some(Stmt::Var {
+                    value: Some(Expr::Lambda { .. }),
+                    ..
+                })
+            ),
+            "a statement after it: {out:?}"
+        );
     }
 
     #[test]
