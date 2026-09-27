@@ -25,7 +25,16 @@ command -v openssl >/dev/null ||
 name="Balaur Signing Check"
 work=$(mktemp -d)
 password=$(openssl rand -hex 24)
-trap 'rm -rf "$work"' EXIT
+# Windows holds an executable for a moment after it exits; a temp directory
+# left behind costs nothing, so cleaning up never fails a check that passed.
+cleanup() {
+  for _ in 1 2 3 4 5; do
+    rm -rf "$work" 2>/dev/null && return 0
+    sleep 1
+  done
+  return 0
+}
+trap cleanup EXIT
 
 step() { printf '\n== %s ==\n' "$1"; }
 
@@ -64,6 +73,8 @@ bundle_identity() { # bundle_identity <out>
 step "a project to sign"
 project=$work/project
 "$balaur" new "$project" >/dev/null
+# With an icon, so what is signed is a runtime whose resources the export rewrote.
+"$(dirname "$0")/with_icon.sh" "$project"
 
 # A signed game has to still find the pack behind its own signature: on
 # Windows the certificate table lands after it, and this is the only check
@@ -98,8 +109,7 @@ if [[ $target == macos-* ]]; then
   restore() {
     security delete-keychain "$keychain" 2>/dev/null
     [ ${#held[@]} -gt 0 ] && security list-keychains -d user -s "${held[@]}"
-    rm -rf "$work"
-    return 0
+    cleanup
   }
   trap restore EXIT
   security create-keychain -p "$password" "$keychain"
@@ -142,7 +152,7 @@ else
 
   step "export, signed"
   game=$work/game.exe
-  BALAUR_SIGN_PASSWORD=$password "$balaur" export "$project" --target "$target" \
+  BALAUR_WINDOWS_CERTIFICATE_PASSWORD=$password "$balaur" export "$project" --target "$target" \
     -o "$game" --sign "$(cygpath -w "$work/identity.pfx")" --no-download
 
   step "what signtool says"

@@ -10,7 +10,7 @@
 //! ```rune
 //! pub fn draw_ui(this) {
 //!     ui::top_panel("bar", #{ height: 56.0, fill: "#20242a" }, || {
-//!         if ui::pill("Scene", #{ active: true }) { /* ... */ }
+//!         if ui::button("Scene", #{ checked: true }) { /* ... */ }
 //!     });
 //! }
 //! ```
@@ -24,6 +24,8 @@ mod images;
 mod immediate;
 mod loading;
 mod pacing;
+pub mod palette;
+mod routing;
 mod splash;
 mod theme;
 mod vocabulary;
@@ -34,11 +36,16 @@ use balaur_core::Engine;
 use std::collections::{HashMap, HashSet};
 
 pub use loading::Loading;
-pub use pacing::{Pacing, honour_lazy, pointer_is_dragging_elsewhere, wants_pass};
+pub use pacing::{
+    NextFrame, Pacing, honour_lazy, next_frame, pointer_is_dragging_elsewhere, wants_pass,
+};
+pub use routing::{pointer_is_ui, takes_point};
 pub use theme::ThemeTokens;
 pub use widget::input::{
-    CHANGE_EVENT, CLICK_EVENT, GUTTER_EVENT, LINK_EVENT, MOVE_EVENT, SUBMIT_EVENT,
-    WidgetInputBuffer, WidgetInputSnapshot, click, submit,
+    ACTIVATE_EVENT, BLUR_EVENT, CHANGE_EVENT, CLICK_EVENT, CLOSE_REQUEST_EVENT, CLOSED_EVENT,
+    COMMIT_EVENT, DOUBLE_CLICK_EVENT, DROP_EVENT, FOCUS_EVENT, FOLD_EVENT, GUTTER_EVENT,
+    LINK_EVENT, MARK_EVENT, MOVE_EVENT, OPENED_EVENT, SCROLLED_EVENT, SUBMIT_EVENT,
+    WidgetInputBuffer, WidgetInputSnapshot, click, edit, submit,
 };
 pub use widget::node::{Move, Surface, UiFocus, Widget, WidgetLayerConfig};
 pub use widget::theme::WidgetTheme;
@@ -59,9 +66,7 @@ pub fn widget_rect(entity: balaur_core::hecs::Entity) -> Option<egui::Rect> {
 /// bar overflows and the icons stop matching; the zoom grows all three.
 pub const TOUCH_TARGET: f32 = 44.0;
 
-pub use immediate::{
-    ALIGNS, ANCHORS, CLASSES, FONT_STYLES, FONTS, MODIFIERS, PILL_ALIGNS, WIDGET_KINDS,
-};
+pub use immediate::{ALIGNS, ANCHORS, CLASSES, FONT_STYLES, FONTS, MODIFIERS, WIDGET_KINDS};
 
 /// Where this project puts the lines between the screen classes, and whether
 /// the reader's own text size counts. Read once, after the project has
@@ -280,8 +285,10 @@ impl balaur_plugin::Plugin for UiPlugin {
         reg.insert_resource(UiState::default());
         reg.insert_resource(Pacing::default());
         reg.insert_resource(WidgetLayerConfig::default());
+        reg.insert_resource(widget::pool::PoolState::default());
         reg.insert_resource(UiFocus::default());
-        reg.insert_resource(crate::widget::node::UiPointer::default());
+        reg.insert_resource(routing::UiHits::default());
+        reg.insert_resource(routing::PointerRoute::default());
         balaur_text::glyph::install(reg);
         reg.register_asset_type(
             widget::theme::ASSET_TYPE,
@@ -392,14 +399,16 @@ fn pass(eng: &Engine, ctx: &egui::Context) {
     widget::theme::set_pass_classes(&widget::arena::begin_classes(eng));
     apply_long_press(eng, ctx);
     bridge::enter_pass(ctx, roles);
+    routing::pass_begins(eng);
     // Painting order is egui's `Order` — widgets are `Middle`, an overlay is
     // `Foreground` — so what is on top does not depend on which ran first.
     widget::layer::draw(eng, ctx);
     if let Some(host) = eng.script_host() {
-        host.call_all("draw_ui");
+        host.call_all(balaur_core::hooks::DRAW_UI);
     }
     // Over everything, scripts' overlays included, for as long as it lasts.
     splash::draw(eng, ctx);
+    routing::pass_drew(eng, ctx);
     bridge::leave_pass();
     pacing::mark_pass(eng);
     state.borrow_mut().font_atlas = Some(FontAtlas::of(ctx));

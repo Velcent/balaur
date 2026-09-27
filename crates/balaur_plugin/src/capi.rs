@@ -45,7 +45,7 @@
 //! responsibility: a C function that unwinds into Rust is equally undefined.
 
 use std::ffi::c_void;
-#[cfg(feature = "dylib")]
+#[cfg(feature = "extensions")]
 use std::ffi::{CStr, c_char};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -62,13 +62,13 @@ use crate::{Manifest, Plugin, Registry};
 pub const BALAUR_ABI_VERSION: u32 = 1;
 
 // Only the loader looks for these, and only it needs them named.
-#[cfg(feature = "dylib")]
+#[cfg(feature = "extensions")]
 pub(crate) const C_ABI_SYMBOL: &[u8] = b"balaur_extension_abi";
-#[cfg(feature = "dylib")]
+#[cfg(feature = "extensions")]
 pub(crate) const C_NAME_SYMBOL: &[u8] = b"balaur_extension_name";
-#[cfg(feature = "dylib")]
+#[cfg(feature = "extensions")]
 pub(crate) const C_VERSION_SYMBOL: &[u8] = b"balaur_extension_version";
-#[cfg(feature = "dylib")]
+#[cfg(feature = "extensions")]
 pub(crate) const C_DECLARE_SYMBOL: &[u8] = b"balaur_extension_declare";
 
 pub const BALAUR_NIL: u32 = 0;
@@ -365,6 +365,10 @@ struct Arena {
     maps: Vec<Box<[BalaurEntry]>>,
 }
 
+fn numbers(values: &[f32]) -> Vec<Value> {
+    values.iter().map(|v| Value::Num(f64::from(*v))).collect()
+}
+
 fn to_c(value: &Value, arena: &mut Arena) -> BalaurValue {
     let (kind, payload) = match value {
         Value::Nil => (BALAUR_NIL, BalaurPayload { bits: 0 }),
@@ -396,6 +400,9 @@ fn to_c(value: &Value, arena: &mut Arena) -> BalaurValue {
             },
         ),
         Value::Color(rgba) => (BALAUR_COLOR, BalaurPayload { vector: *rgba }),
+        // A payload holds four floats at most, so C is handed a list.
+        Value::Transform2d(columns) => (BALAUR_LIST, list_payload(&numbers(columns), arena)),
+        Value::Transform3d(columns) => (BALAUR_LIST, list_payload(&numbers(columns), arena)),
         Value::Node(bits) => (BALAUR_NODE, BalaurPayload { bits: *bits }),
         Value::Callback(id) => (BALAUR_CALLBACK, BalaurPayload { bits: id.0 }),
         Value::List(items) => (BALAUR_LIST, list_payload(items, arena)),
@@ -546,7 +553,7 @@ impl Plugin for CExtension {
 ///
 /// # Safety
 /// `text` must be a valid NUL-terminated string, or null.
-#[cfg(feature = "dylib")]
+#[cfg(feature = "extensions")]
 pub(crate) unsafe fn static_text(text: *const c_char) -> Option<String> {
     if text.is_null() {
         return None;

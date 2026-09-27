@@ -32,7 +32,7 @@ pub(crate) enum Abi {
 
 impl Abi {
     /// The directory name under `lib/`, which is the same string a project
-    /// writes and the name `package_template.sh` stages.
+    /// writes and the name `package_runtime.sh` stages.
     pub(crate) const fn dir(self) -> &'static str {
         match self {
             Self::Arm64V8a => "arm64-v8a",
@@ -56,7 +56,7 @@ pub(crate) struct AndroidConfig {
     /// against. Empty keeps the invented `org.balaur.<name>`.
     pub application_id: String,
     /// The name under the icon. Empty means the project's own.
-    pub label: String,
+    pub display_name: String,
     /// `versionName`: what a player is shown.
     pub version: String,
     /// `versionCode`: what Play orders updates by, and the only one it reads.
@@ -68,6 +68,12 @@ pub(crate) struct AndroidConfig {
     /// Which of the template's ABIs the export keeps. Empty means every one
     /// the template carries, so a game that says nothing ships everywhere.
     pub abis: Vec<Abi>,
+    /// A project-relative keystore, or empty for Android's debug identity.
+    pub keystore: String,
+    pub key: String,
+    /// Where `bundletool.jar` is. Empty looks at BALAUR_ANDROID_BUNDLETOOL and
+    /// then beside the SDK; Google ships it on its own, not in the SDK.
+    pub bundletool: String,
     /// `[window] orientation`, which Android settles in the manifest rather
     /// than at startup. Not a key of `[android]`: it is the same window
     /// setting every platform reads, taken from the same resolved document.
@@ -79,13 +85,16 @@ impl Default for AndroidConfig {
     fn default() -> Self {
         Self {
             application_id: String::new(),
-            label: String::new(),
+            display_name: String::new(),
             version: "1.0".into(),
             version_code: 1,
             // 0 defers to the template's own, read at export.
             min_sdk: 0,
             target_sdk: 35,
             abis: Vec::new(),
+            keystore: String::new(),
+            key: String::new(),
+            bundletool: String::new(),
             orientation: balaur::project::Orientation::Any,
         }
     }
@@ -165,7 +174,7 @@ impl AndroidConfig {
         }
         let floor: u32 = attr(template, "android:minSdkVersion")?.parse().context(
             "the template's android:minSdkVersion is not a number; \
-             scripts/package_template.sh writes it",
+             scripts/package_runtime.sh writes it",
         )?;
         let min_sdk = if self.min_sdk == 0 {
             floor
@@ -185,10 +194,10 @@ impl AndroidConfig {
                 self.target_sdk
             );
         }
-        let label = if self.label.is_empty() {
+        let label = if self.display_name.is_empty() {
             name
         } else {
-            self.label.as_str()
+            self.display_name.as_str()
         };
         let mut xml = set_attr(template, "package", &id)?;
         xml = set_attr(&xml, "android:versionCode", &self.version_code.to_string())?;
@@ -213,6 +222,17 @@ impl AndroidConfig {
             ),
         })
     }
+}
+
+/// The manifest with the application naming the icon the exporter wrote
+/// under `res/`.
+pub(crate) fn name_icon(xml: &str) -> String {
+    set_or_add_attr(
+        xml,
+        "<application",
+        "android:icon",
+        crate::icon::ANDROID_ICON,
+    )
 }
 
 /// One attribute on the element `opening` names, added when the template does
@@ -384,7 +404,7 @@ pub(crate) fn assemble(
     layout: &Path,
     output: &Path,
     project: &Path,
-    config: &ExportConfig,
+    config: &AndroidConfig,
 ) -> Result<PathBuf> {
     let sdk = Sdk::find()?;
     let apk = output.with_extension("apk");
@@ -393,6 +413,7 @@ pub(crate) fn assemble(
     std::fs::create_dir_all(&work)?;
 
     let linked = work.join("linked.apk");
+    let resources = compile_resources(&sdk, layout, &work)?;
     run(
         Command::new(sdk.program("aapt2")?)
             .arg("link")
@@ -401,7 +422,8 @@ pub(crate) fn assemble(
             .arg("--manifest")
             .arg(layout.join("AndroidManifest.xml"))
             .arg("-I")
-            .arg(&sdk.platform_jar),
+            .arg(&sdk.platform_jar)
+            .args(&resources),
         "aapt2 link",
     )?;
 
@@ -447,9 +469,9 @@ const JDK: &str = "install a JDK — Android Studio carries one";
 
 /// Where `bundletool.jar` is: what the project names, then the variable, then
 /// beside the SDK. Google ships it on its own, so the SDK never holds it.
-fn bundletool(project: &Path, config: &ExportConfig) -> Result<PathBuf> {
+fn bundletool(project: &Path, config: &AndroidConfig) -> Result<PathBuf> {
     let named = ExportConfig::beside(project, &config.bundletool)
-        .or_else(|| std::env::var_os("BALAUR_BUNDLETOOL").map(PathBuf::from));
+        .or_else(|| std::env::var_os("BALAUR_ANDROID_BUNDLETOOL").map(PathBuf::from));
     if let Some(path) = named {
         if path.is_file() {
             return Ok(path);
@@ -464,7 +486,7 @@ fn bundletool(project: &Path, config: &ExportConfig) -> Result<PathBuf> {
         _ => bail!(
             "no bundletool.jar: it is not part of the SDK. Download it from \
              https://github.com/google/bundletool/releases, then set \
-             BALAUR_BUNDLETOOL or [export] bundletool to where it is."
+             BALAUR_ANDROID_BUNDLETOOL or [android] bundletool to where it is."
         ),
     }
 }
@@ -479,7 +501,7 @@ pub(crate) fn bundle(
     layout: &Path,
     output: &Path,
     project: &Path,
-    config: &ExportConfig,
+    config: &AndroidConfig,
 ) -> Result<PathBuf> {
     let sdk = Sdk::find()?;
     let jar = bundletool(project, config)?;
@@ -491,6 +513,7 @@ pub(crate) fn bundle(
     // --proto-format is the whole reason this needs no protobuf of its own:
     // aapt2 encodes the manifest and the resource table the way a bundle reads.
     let linked = work.join("proto.apk");
+    let resources = compile_resources(&sdk, layout, &work)?;
     run(
         Command::new(sdk.program("aapt2")?)
             .arg("link")
@@ -500,7 +523,8 @@ pub(crate) fn bundle(
             .arg("--manifest")
             .arg(layout.join("AndroidManifest.xml"))
             .arg("-I")
-            .arg(&sdk.platform_jar),
+            .arg(&sdk.platform_jar)
+            .args(&resources),
         "aapt2 link --proto-format",
     )?;
 
@@ -535,8 +559,29 @@ pub(crate) fn bundle(
     Ok(aab)
 }
 
+/// The layout's `res/`, compiled into the archive `aapt2 link` takes beside the
+/// manifest: nothing for a layout with no resources, as a game with no icon is.
+fn compile_resources(sdk: &Sdk, layout: &Path, work: &Path) -> Result<Vec<PathBuf>> {
+    let res = layout.join("res");
+    if !res.is_dir() {
+        return Ok(Vec::new());
+    }
+    let compiled = work.join("res.zip");
+    run(
+        Command::new(sdk.program("aapt2")?)
+            .arg("compile")
+            .arg("--dir")
+            .arg(&res)
+            .arg("-o")
+            .arg(&compiled),
+        "aapt2 compile",
+    )?;
+    Ok(vec![compiled])
+}
+
 /// The base module a bundle is made of: aapt2's protobuf manifest and resource
-/// table at the names bundletool reads, and the payload under its own roots.
+/// table at the names bundletool reads, the compiled resources under `res/`,
+/// and the payload under its own roots.
 fn write_module(module: &Path, linked: &Path, layout: &Path) -> Result<()> {
     let mut zip = zip::ZipWriter::new(std::fs::File::create(module)?);
     let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default()
@@ -555,6 +600,18 @@ fn write_module(module: &Path, linked: &Path, layout: &Path) -> Result<()> {
         let mut body = Vec::new();
         std::io::Read::read_to_end(&mut entry, &mut body)?;
         zip.start_file(to, options)?;
+        zip.write_all(&body)?;
+    }
+    let resources: Vec<String> = linked
+        .file_names()
+        .filter(|name| name.starts_with("res/"))
+        .map(str::to_string)
+        .collect();
+    for name in resources {
+        let mut entry = linked.by_name(&name)?;
+        let mut body = Vec::new();
+        std::io::Read::read_to_end(&mut entry, &mut body)?;
+        zip.start_file(&name, options)?;
         zip.write_all(&body)?;
     }
     for (name, path) in payload_files(layout) {
@@ -633,22 +690,22 @@ struct Keystore {
 
 /// The project's release keystore, or Android's public debug identity for a
 /// build that has none — which installs on a device and ships nowhere.
-fn keystore_for(project: &Path, config: &ExportConfig) -> Result<Keystore> {
-    if let Some(path) = ExportConfig::beside(project, &config.android_keystore) {
+fn keystore_for(project: &Path, config: &AndroidConfig) -> Result<Keystore> {
+    if let Some(path) = ExportConfig::beside(project, &config.keystore) {
         anyhow::ensure!(
             path.is_file(),
-            "[export] android_keystore names {}, which does not exist",
+            "[android] keystore names {}, which does not exist",
             path.display()
         );
-        let store = crate::config::secret("BALAUR_KEYSTORE_PASSWORD")?;
-        let key = secret_or("BALAUR_KEY_PASSWORD", &store);
+        let store = crate::config::secret("BALAUR_ANDROID_KEYSTORE_PASSWORD")?;
+        let key = secret_or("BALAUR_ANDROID_KEY_PASSWORD", &store);
         anyhow::ensure!(
-            !config.android_key.is_empty(),
-            "[export] android_keystore needs android_key: a keystore holds more than one"
+            !config.key.is_empty(),
+            "[android] keystore needs key: a keystore holds more than one"
         );
         return Ok(Keystore {
             path,
-            alias: config.android_key.clone(),
+            alias: config.key.clone(),
             store_password: store,
             key_password: key,
             what: "release key",
@@ -749,7 +806,7 @@ mod tests {
         assert!(err.contains("arm64-v8a"), "{err}");
     }
 
-    /// The manifest scripts/package_template.sh stages, activity and all.
+    /// The manifest scripts/package_runtime.sh stages, activity and all.
     const TEMPLATE_WITH_ACTIVITY: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="org.balaur.template"
@@ -766,7 +823,7 @@ mod tests {
 </manifest>
 "#;
 
-    /// The manifest scripts/package_template.sh stages.
+    /// The manifest scripts/package_runtime.sh stages.
     const TEMPLATE: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="org.balaur.template"
@@ -816,7 +873,7 @@ mod tests {
     fn the_project_names_the_id_the_version_and_the_label() {
         let config = AndroidConfig {
             application_id: "com.studio.tide".into(),
-            label: "Tide & Sand".into(),
+            display_name: "Tide & Sand".into(),
             version: "2.3".into(),
             version_code: 17,
             target_sdk: 34,
@@ -878,6 +935,7 @@ mod tests {
             for (name, body) in [
                 ("AndroidManifest.xml", &b"proto"[..]),
                 ("resources.pb", &b"table"[..]),
+                ("res/mipmap-anydpi-v26/icon.xml", &b"adaptive"[..]),
             ] {
                 zip.start_file(name, options).unwrap();
                 std::io::Write::write_all(&mut zip, body).unwrap();
@@ -902,8 +960,20 @@ mod tests {
                 "assets/game.bpak",
                 "lib/arm64-v8a/libmain.so",
                 "manifest/AndroidManifest.xml",
+                "res/mipmap-anydpi-v26/icon.xml",
                 "resources.pb",
             ]
+        );
+    }
+
+    #[test]
+    fn a_game_with_an_icon_names_it_on_its_application() {
+        let xml = super::name_icon(TEMPLATE);
+        assert!(xml.contains(r#"android:icon="@mipmap/icon""#), "{xml}");
+        assert_eq!(
+            super::name_icon(&xml),
+            xml,
+            "naming it twice changes nothing"
         );
     }
 

@@ -103,8 +103,32 @@ fn real_path(fs: &dyn FileBackend, path: &Path) -> PathBuf {
     fs.canonicalize(path)
 }
 
+/// The project files of a game run from a pack, for a project-relative path:
+/// its data files are there, and the backend holds only what it wrote. The
+/// pack answers first, so a file in the working directory cannot stand in.
+fn packed_files(
+    eng: &Engine,
+    path: &str,
+) -> Option<std::rc::Rc<std::cell::RefCell<crate::project::ProjectFiles>>> {
+    if files::rooted(Path::new(path)) {
+        return None;
+    }
+    let project = eng.try_resource::<crate::project::ProjectFiles>()?;
+    let from_pack = project.borrow().from_pack();
+    from_pack.then_some(project)
+}
+
 pub(crate) fn fs_read(eng: &Engine, args: &[Value]) -> Result<Value> {
-    let path = resolve(eng, text(args, 0)?)?;
+    let named = text(args, 0)?;
+    if let Some(project) = packed_files(eng, named) {
+        let project = project.borrow();
+        if project.packs(named)
+            && let Ok(bytes) = project.read(named)
+        {
+            return Ok(String::from_utf8(bytes).map_or(Value::Nil, Value::text));
+        }
+    }
+    let path = resolve(eng, named)?;
     Ok(files::backend(eng)
         .read(&path)
         .ok()
@@ -123,7 +147,11 @@ pub(crate) fn fs_write(eng: &Engine, args: &[Value]) -> Result<Value> {
 }
 
 pub(crate) fn fs_exists(eng: &Engine, args: &[Value]) -> Result<Value> {
-    let path = resolve(eng, text(args, 0)?)?;
+    let named = text(args, 0)?;
+    if packed_files(eng, named).is_some_and(|project| project.borrow().packs(named)) {
+        return Ok(Value::Bool(true));
+    }
+    let path = resolve(eng, named)?;
     Ok(Value::Bool(files::backend(eng).exists(&path)))
 }
 
@@ -173,14 +201,19 @@ pub(crate) fn fs_mtime(eng: &Engine, args: &[Value]) -> Result<Value> {
 }
 
 pub(crate) fn fs_list(eng: &Engine, args: &[Value]) -> Result<Value> {
-    let path = resolve(eng, text(args, 0)?)?;
+    let dir = text(args, 0)?;
+    let path = resolve(eng, dir)?;
     let mut names: Vec<(String, bool)> = files::backend(eng)
         .list(&path)
         .into_iter()
         .filter(|(name, _)| !name.starts_with('.'))
         .collect();
+    if let Some(project) = packed_files(eng, dir) {
+        names.extend(project.borrow().packed_children(dir));
+    }
     // Sorted for stable UI and reproducible tooling runs.
     names.sort();
+    names.dedup();
     Ok(Value::List(
         names
             .into_iter()
@@ -222,9 +255,28 @@ pub(crate) fn toml_patch(_: &Engine, args: &[Value]) -> Result<Value> {
     };
     let mut doc: toml_edit::DocumentMut = existing.parse().context("parsing the document")?;
     for (key, value) in table {
-        doc[&key] = as_item(&value);
+        let mut item = as_item(&value);
+        keep_leading_comment(doc.get(&key), &mut item);
+        doc[&key] = item;
     }
     Ok(Value::Str(doc.to_string()))
+}
+
+/// Carry the comment above a list's first `[[block]]` over to the list that
+/// replaces it. That comment is usually the file's own header, which a list
+/// written whole would otherwise take with it.
+fn keep_leading_comment(was: Option<&toml_edit::Item>, now: &mut toml_edit::Item) {
+    let (Some(toml_edit::Item::ArrayOfTables(was)), toml_edit::Item::ArrayOfTables(now)) =
+        (was, now)
+    else {
+        return;
+    };
+    let (Some(first), Some(replacing)) = (was.get(0), now.get_mut(0)) else {
+        return;
+    };
+    if let Some(prefix) = first.decor().prefix() {
+        replacing.decor_mut().set_prefix(prefix.clone());
+    }
 }
 
 /// A parsed value as a document item. An array of tables is written as one,
@@ -310,6 +362,8 @@ pub fn to_json(v: &Value) -> Result<serde_json::Value> {
         Value::Vec2(a) => json_number_list(a)?,
         Value::Vec3(a) => json_number_list(a)?,
         Value::Color(a) => json_number_list(a)?,
+        Value::Transform2d(a) => json_number_list(a)?,
+        Value::Transform3d(a) => json_number_list(a)?,
         Value::List(items) => {
             serde_json::Value::Array(items.iter().map(to_json).collect::<Result<_>>()?)
         }
@@ -332,4 +386,33 @@ fn json_number_list(a: &[f32]) -> Result<serde_json::Value> {
             })
             .collect::<Result<_>>()?,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn patched(existing: &str, table: &str) -> String {
+        let value =
+            crate::node_api::from_toml(&toml::from_str::<toml::Value>(table).unwrap()).unwrap();
+        let engine = crate::Engine::default();
+        match toml_patch(&engine, &[Value::Str(existing.into()), value]).unwrap() {
+            Value::Str(text) => text,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// A list written whole keeps the comment its first block carried, which
+    /// is the file's header when the list opens the file.
+    #[test]
+    fn a_list_written_whole_keeps_the_header_above_it() {
+        let text = patched(
+            "# The file's header.\n[[assets]]\nid = \"a\"\n\n[[nodes]]\nid = \"n\"\n",
+            "[[assets]]\nid = \"b\"\n[[assets]]\nid = \"c\"\n",
+        );
+        assert!(text.starts_with("# The file's header."), "{text}");
+        let back: toml::Value = toml::from_str(&text).unwrap();
+        assert_eq!(back["assets"].as_array().unwrap().len(), 2);
+        assert_eq!(back["nodes"][0]["id"].as_str(), Some("n"));
+    }
 }

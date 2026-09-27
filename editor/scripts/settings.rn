@@ -61,28 +61,31 @@ pub fn load_files(S) {
     if S.game_root != "" {
         let manifest = fs::read(S.game_root + "/project.toml");
         if manifest is String {
-            settings::load(manifest);
+            settings::merge_toml(manifest);
         }
     }
     let prefs = fs::read(prefs_path());
     if prefs is String {
-        settings::load(prefs);
+        settings::merge_toml(prefs);
     }
     apply(S);
 }
 
 // The editor's own settings are the person's, in the folder every project shares.
 pub fn prefs_path() {
-    project::data_dir() + "/editor.toml"
+    project::editor_data_directory() + "/editor.toml"
 }
 
 // Categories in definition order, project first: a game author looks for what
 // ships far more often than for what does not.
 fn categories() {
+    let all = settings::all();
     let seen = [];
+    let known = #{};
     for scope in ["project", "editor"] {
-        for def in settings::all() {
-            if def.scope == scope && !seen.iter().any(|c| c == def.category) {
+        for def in all {
+            if def.scope == scope && !known.contains_key(def.category) {
+                known[def.category] = true;
                 seen.push(def.category);
             }
         }
@@ -90,19 +93,20 @@ fn categories() {
     seen
 }
 
-// A category with anything that ships is a project one; its editor-only
-// rows follow under their own heading.
-fn scope_of(category) {
-    let found = #{ any: false };
+// Where each category is listed: one with anything that ships is a project
+// one, and its editor-only rows follow under their own heading.
+fn scopes() {
+    let out = #{};
     for def in settings::all() {
-        if def.category == category {
-            if def.scope == "project" {
-                return "project";
-            }
-            found.any = true;
+        if def.scope == "project" || !out.contains_key(def.category) {
+            out[def.category] = def.scope;
         }
     }
-    if found.any { "editor" } else { "project" }
+    out
+}
+
+fn scope_of(category) {
+    scopes().get(category).unwrap_or("project")
 }
 
 fn current(S) {
@@ -120,10 +124,11 @@ fn current(S) {
 // everything in the chosen category.
 fn showing(S) {
     let query = query(S).to_lowercase();
+    let at = current(S);
     let rows = [];
     for def in settings::all() {
         let matches = if query == "" {
-            def.category == current(S)
+            def.category == at
         } else {
             // The path and the help both, so "packet" finds `multiplayer/loss`
             // by its sentence when its name does not say it.
@@ -192,7 +197,7 @@ const SIDEBAR_GAP = 20.0;
 /// is beside it.
 fn row_w(S) {
     let inner = crate::window::inner_w(S);
-    if ui::screen_size()[0] < STACK_BELOW {
+    if ui::window_size()[0] < STACK_BELOW {
         return inner;
     }
     util::max(inner - SIDEBAR_W - SIDEBAR_GAP, 160.0)
@@ -200,20 +205,30 @@ fn row_w(S) {
 
 pub fn draw(S) {
     let k = S.theme;
-    let stacked = ui::screen_size()[0] < STACK_BELOW;
+    let stacked = ui::window_size()[0] < STACK_BELOW;
     let hosts = crate::window::sheet_form(S, "settings", "Settings", || { save_button(S, k); });
     if util::is_nil(hosts) {
         return;
     }
+    // Built again only when what the rows show moved: every definition and
+    // value is behind `settings::revision`.
+    let key = [
+        settings::revision(), query(S), S.settings.at, S.settings.target,
+        stacked, S.touchscreen,
+    ];
     // Narrow, the categories go above the rows rather than beside them: a
     // sidebar and a column of settings leave neither enough room.
-    crate::pool::strip(S, hosts.side + "/SheetSideRows", if stacked { [] } else { side_controls(S, k) });
+    crate::pool::strip_when(S, hosts.side_rows, key, || {
+        if stacked { [] } else { side_controls(S, k) }
+    });
     util::fill(hosts.side, #{ visible: !stacked });
-    let specs = form_specs(S, k);
-    if stacked {
-        specs.insert(0, picker_spec(S));
-    }
-    crate::pool::sync(S, hosts.form, specs, label_w(S), stacked);
+    crate::pool::sync_when(S, hosts.form, key, label_w(S), stacked, || {
+        let specs = form_specs(S, k);
+        if stacked {
+            specs.insert(0, picker_spec(S));
+        }
+        specs
+    });
 }
 
 
@@ -229,7 +244,7 @@ fn picker_spec(S) {
         names.push(category);
     }
     #{ full: true, height: crate::style::row_h(S), controls: [#{
-        kind: "dropdown", role: "form_pick", grow: 1,
+        kind: "dropdown", role: "choice_form", grow: 1,
         text: current(S), options: names,
         on: |picked| {
             set_query(S, "");
@@ -243,7 +258,7 @@ fn save_button(S, k) {
     if !S.settings.dirty {
         return;
     }
-    if ui::pill("Save", #{ height: 24, size: style::MD, radius: 8, fill: k.accent_fill, color: k.on_accent }) {
+    if ui::button("Save", #{ height: 24, font_size: style::MD, corner_radius: 8, fill: k.primary_fill, text_color: k.text_on_primary }) {
         commit(S);
     }
 }
@@ -253,21 +268,23 @@ fn save_button(S, k) {
 fn side_controls(S, k) {
     let out = [crate::search::control(S, FIELD, "Search", SIDEBAR_W)];
     let scope = "";
+    let at = current(S);
+    let scopes = scopes();
     for name in categories() {
         // Bound afresh: a closure made in a loop captures the binding.
         let category = name;
-        let here = scope_of(category);
+        let here = scopes.get(category).unwrap_or("project");
         if here != scope {
             scope = here;
             out.push(#{
-                kind: "label", role: "meta",
+                kind: "label", role: "text_caption",
                 text: if scope == "project" { "PROJECT" } else { "THIS EDITOR" },
             });
         }
-        let on = query(S) == "" && category == current(S);
+        let on = query(S) == "" && category == at;
         out.push(#{
             kind: "button", text: category,
-            role: if on { "side_row_on" } else { "side_row" },
+            role: "item_sidebar", checked: on,
             on: |_| {
                 set_query(S, "");
                 S.settings.at = category;
@@ -286,9 +303,9 @@ fn form_specs(S, k) {
     if query(S) != "" {
         out.push(note_spec(format!("{} matching \"{}\"", rows.len(), query(S))));
     } else if scope_of(current(S)) == "project" {
-        out.push(#{ full: true, height: 34, slot_role: "verb_row", controls: [
+        out.push(#{ full: true, height: 34, slot_role: "layout_actions", controls: [
             #{
-                kind: "label", role: "meta", grow: 1,
+                kind: "label", role: "text_caption", grow: 1,
                 text: "Written to project.toml, and shipped with the game.",
             },
             target_control(S),
@@ -323,14 +340,14 @@ fn form_specs(S, k) {
         let controls = [editor_control(S, def, path)];
         if path == crate::theme::SETTING {
             controls.push(#{
-                kind: "button", role: "row_action_accent", text: "Edit…",
-                tooltip: "Open the theme window",
+                kind: "button", role: "action_form_primary", text: "Edit…",
+                tooltip: "Open the Theme dialog",
                 on: |_| { crate::themewin::open(S); },
             });
         }
         out.push(#{
             label: if searching { path } else { key_of(def) },
-            height: h, slot_role: "verb_row",
+            height: h, slot_role: "layout_actions",
             controls: controls,
         });
         let spec = util::obj(def.spec);
@@ -344,12 +361,12 @@ fn form_specs(S, k) {
             let on = tag;
             let at = override_path(on, path);
             out.push(#{
-                label: "  on " + on, height: h, slot_role: "verb_row",
+                label: "  on " + on, height: h, slot_role: "layout_actions",
                 controls: [
                     editor_control(S, def, at),
                     #{
                         kind: "button", role: "chip_quiet", text: "×",
-                        tooltip: "Clear this override",
+                        tooltip: "Reset this override",
                         on: |_| {
                             settings::clear(at);
                             S.settings.dirty = true;
@@ -365,13 +382,13 @@ fn form_specs(S, k) {
 /// A line of prose across both columns, and a group's heading.
 fn note_spec(text) {
     #{ full: true, height: 0, controls: [#{
-        kind: "label", role: "meta", grow: 1, wrap: true, text: text,
+        kind: "label", role: "text_caption", grow: 1, wrap: true, text: text,
     }] }
 }
 
 fn head_spec(text) {
     #{ full: true, height: 24, controls: [#{
-        kind: "label", role: "meta", grow: 1, text: text,
+        kind: "label", role: "text_caption", grow: 1, text: text,
     }] }
 }
 
@@ -387,7 +404,7 @@ fn target_control(S) {
         options.push(tag);
     }
     #{
-        kind: "dropdown", role: "form_pick", width: 170,
+        kind: "dropdown", role: "choice_form", width: 170,
         text: if S.settings.target == "" { "override for…" } else { "override for " + S.settings.target },
         options: options,
         on: |picked| {
@@ -410,15 +427,15 @@ fn editor_control(S, def, path) {
     let value = settings::base(path);
     if datatype == "bool" {
         return #{
-            kind: "switch", role: "switch", checked: value == true,
+            kind: "switch", role: "switch_form", checked: value == true,
             on: |on| { write(S, path, on); },
         };
     }
     if datatype == "enum" {
-        // The theme's choices are files, so they are listed, not declared.
+        // The person's own themes are folders, so the list is read, not declared.
         let named = path == crate::theme::SETTING;
         return #{
-            kind: "dropdown", role: "form_pick", grow: 1,
+            kind: "dropdown", role: "choice_form", grow: 1,
             text: if value is String { value } else { "" },
             options: if named { crate::theme::names() } else { util::vec(spec.get("options").unwrap_or([])) },
             on: |picked| { write(S, path, picked); },
@@ -432,7 +449,7 @@ fn editor_control(S, def, path) {
         let now = if value is Tuple { low } else { util::f(value) };
         let whole = datatype == "int";
         return #{
-            kind: "drag_value", role: "form_value", grow: 1,
+            kind: "number_field", role: "input_number", grow: 1,
             value: now, min: low, max: high, step: if whole { 1.0 } else { 0.01 },
             on: |v| {
                 write(S, path, if whole { math::round(v) as i64 } else { v });
@@ -451,7 +468,7 @@ fn editor_control(S, def, path) {
         format!("{}", value)
     };
     #{
-        kind: "field", role: "form_field", grow: 1, text: shown,
+        kind: "text_field", role: "input_form", grow: 1, text: shown,
         on_submit: |text| {
             write(S, path, if datatype == "list" { split_commas(text) } else { text });
         },
@@ -506,7 +523,7 @@ pub fn apply(S) {
     if compact is bool {
         S.settings.compact = compact;
     }
-    let verify = settings::get("editor/sessions/verify");
+    let verify = settings::get("editor/recordings/verify");
     if verify is bool {
         S.session.verify = verify;
     }

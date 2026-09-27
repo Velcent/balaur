@@ -43,7 +43,7 @@ what a 113-line project costs, because a pack ships the compiled unit.
 ## 1. The units a run already compiled
 
 **Built.** `crates/balaur_script_rune/src/cache.rs` keeps every unit a dev run
-compiles, under `units/` in the project's user data directory, one file a
+compiles, under `script_cache/` in the project's user data directory, one file a
 script. A boot reads it back instead of compiling when nothing it was built
 from has moved.
 
@@ -72,7 +72,9 @@ its own, which was right, and then hands it to AppKit on the main thread, which
 cost 70 ms of an editor boot. Two things changed in
 `crates/balaur_render/src/kiss3d_backend.rs`: an offscreen run never hands one
 over, since it has no dock entry, and a windowed one waits until the third
-frame, so the shell is up before the desktop is told what to draw.
+frame, so the shell is up before the desktop is told what to draw. Windows and
+X11 get the window icon the same way, from `[application] icon` when no script
+names one (`PLAN-editor-themes.md`, "App icons").
 
 ## 3. What the renderer builds before it draws
 

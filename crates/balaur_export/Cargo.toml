@@ -32,6 +32,9 @@ rubato = "5"
 # libimagequant is pure Rust from 4 on, so a browser tab quantises too; its
 # `threads` default is rayon, which builds for wasm but cannot spawn there.
 imagequant = { version = "4", default-features = false }
+# The icon written into a Windows runtime's resources, which Explorer and the
+# taskbar read. Pure Rust, so it runs wherever the exporter does.
+editpe = { version = "0.2", default-features = false, features = ["std"] }
 
 # HarfBuzz's subsetter and libvorbis are C builds: a browser tab exports too,
 # and neither compiles for wasm. Off there, an export keeps its whole faces
@@ -46,7 +49,7 @@ hb-subset = { package = "mkwebfont_hb-subset", version = "0.5", optional = true 
 
 [dev-dependencies]
 tempfile = "3"
-# An SVG rasterized in a test, which a game template never needs.
+# An SVG rasterized in a test, which a game runtime never needs.
 balaur_core = { workspace = true, features = ["svg"] }
 # A test's own sine has to be the same sine on every operating system, which
 # the platform's `sin` is not (DETERMINISM.md).

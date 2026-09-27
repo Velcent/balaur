@@ -16,7 +16,7 @@ ARCHITECTURE.md and the website roadmap already use.
 
 **Async for sequences that span frames.** Four places hold a state machine
 in `S` to do something "next frame" or "after N frames": `anim_rebind`,
-`shot` at frame 60, `breakdemo`'s alternation, `polygon::idle`'s backdrop.
+`shot` at frame 60, `breakpoint`'s alternation, `polygon::idle`'s backdrop.
 Each is a flag, a check in `update`, and a reset. As `pub async fn` they
 read as what they are:
 
@@ -91,13 +91,13 @@ behind an Export button and an Import command, and the async self-tests once
 
 ## 6. Tools not yet built
 
-The curve editor, and the rigging panels below it. Each is a persona tool
+The curve editor, and the rigging panels below it. Each is a workspace tool
 or a dock registered like the built-ins, and each lands with a `--state`
 self-test.
 
 ### Tilemap editor — built, 2026-09-05
 
-The Scene persona has a Tiles tool (`editor/scripts/tiles.rn`, `tilesdemo`).
+The Scene workspace has a Tiles tool (`editor/scripts/tiles.rn`, `test:tiles`).
 The palette dock cuts the tile set's texture by `tile_size` and picks a tile,
 left-drag paints it, right-drag erases, and a Rectangle mode fills between
 two corners. A layer is a sibling `tilemap` node: the Add layer button
@@ -120,9 +120,25 @@ node, so the painter moves the node by half of what it added to hold the
 tiles already down still, and a cell left of column zero has nowhere to go,
 which `origin` on the map replaces in that plan's step 2.
 
+### Populate — built, 2026-09-26
+
+Godot's MultiMesh › Populate Surface, as a sheet over the selected
+`multimesh3d` or `multimesh2d` (`editor/scripts/populate.rn`,
+`test:populate`). It opens from the button on the component's section and
+from the command palette. It lays instances over a surface node's
+triangles, picked by area and standing on each normal, or as a row, a ring
+or a grid. Rotation, tilt and random scale vary each one, from a seed.
+
+The layout is the engine's: `populate` on the node's handle works it out and
+returns the list rather than setting it. The sheet writes that list into the
+asset the node names. Inline or in the scene's `[[assets]]` block it is one
+history step, so undo is free; history now carries the blocks, and a save
+writes them back once a tool has touched one. An asset in its own file is
+saved at once and outside undo, as the tile map's file is.
+
 ### Curve editor and onion skin
 
-The Animate persona's timeline shows keys as dots on a lane. A curve view
+The Animate workspace's timeline shows keys as dots on a lane. A curve view
 under it draws each track's channels as curves against time, with the
 easing of a segment editable by dragging a handle at the key — the twelve
 named easings stay the storage, and a handle drag picks the nearest one,
@@ -141,7 +157,7 @@ against that list. What is there now:
   and Overwrite Rest Pose — and the Polygon tool's Points, Polygons, UV and
   Weights modes with a brush.
 - **A weight table** (`editor/scripts/weights.rn`, the Weights dock,
-  `weightdemo`). Spine's Weights view: the picked vertices, one editable
+  `test:weights`). Spine's Weights view: the picked vertices, one editable
   number per bone, a per-vertex sum that goes red when it is not one, and
   Bind, Unbind, Normalise, Auto (weights by the square of the distance to
   each bone's segment, the same segment `rig::geometry` draws) and Smooth
@@ -168,10 +184,10 @@ against that list. What is there now:
   `balaur_core::geometry2d`'s `trace` and `simplify` — a marched pixel
   boundary and Ramer-Douglas-Peucker, both with headless tests.
 - **Deform keys.** The Points mode edits the offset rather than the mesh
-  while the Animate persona is armed, and the Deform row keys them on
+  while the Animate workspace is armed, and the Deform row keys them on
   `polygon/deform` at the playhead.
 - **A bone map** (`editor/scripts/bonemap.rn`, the Bone map dock,
-  `bonemapdemo`). Godot's BoneMap panel: the canonical humanoid against the
+  `test:bone_map`). Godot's BoneMap panel: the canonical humanoid against the
   rig's own bones, a guess by name that ignores case, separators and an
   exporter's prefix, and a `bone_map` asset written out for
   `animation.play(node, clip, { retarget = … })`.

@@ -94,11 +94,11 @@ fn install_export_api(m: &mut dyn Bindings<Engine>) {
         ("listen", &[], "(node: node, options: map)", LISTEN_DOC),
         ("start", &[], "(target: string, options: map)", "Export the edited project for one target. The bytes go to the page to download rather than into the project. Answers false while a recording plays."),
         ("output", &[], "(target: string)", "The file name an export for this target produces."),
-        ("running", &[], "()", "How many exports are in flight."),
+        ("running_count", &[], "()", "How many exports are in flight."),
         ("preview", &[], "(path: string, target: string)", PREVIEW_DOC),
     ]);
     m.function("targets", |_: &Engine, ()| Ok(targets()));
-    install_listen::<ExportState, ExportEvent>(m, "on_export");
+    install_listen::<ExportState, ExportEvent>(m, "on_export_event");
     m.function(
         "start",
         |eng: &Engine, (target, opts): (String, Option<Value>)| {
@@ -115,7 +115,7 @@ fn install_export_api(m: &mut dyn Bindings<Engine>) {
             _ => format!("{name}.bpak"),
         }))
     });
-    m.function("running", |_: &Engine, ()| {
+    m.function("running_count", |_: &Engine, ()| {
         Ok(i64::try_from(RUNNING.with(std::cell::Cell::get)).unwrap_or(i64::MAX))
     });
     m.function(
@@ -215,21 +215,21 @@ fn build(project: &Path) -> Result<balaur::Pack> {
 async fn bundle(project: &Path, template: &str) -> Result<(String, Vec<u8>)> {
     let pack = build(project)?;
     let name = name_of(project);
-    let shell = balaur_export::web_shell(project)?
-        .replace("{{title}}", &name)
-        .replace("{{pack}}", BUNDLED_PACK);
+    let (shell, icons) =
+        balaur_export::web_page(project, &balaur_export::web_shell(project)?, &name)?;
     let glue = crate::web::fetch_bytes(&beside(template, "balaur.js"))
         .await
         .map_err(|why| anyhow!("fetching the web glue: {}", described(&why)))?;
     let module = crate::web::fetch_bytes(&beside(template, "balaur_bg.wasm"))
         .await
         .map_err(|why| anyhow!("fetching the web module: {}", described(&why)))?;
-    let files = vec![
+    let mut files = vec![
         ("index.html".to_string(), shell.into_bytes()),
         (BUNDLED_PACK.to_string(), pack.encode()),
         ("balaur.js".to_string(), glue),
         ("balaur_bg.wasm".to_string(), module),
     ];
+    files.extend(icons);
     Ok((format!("{name}-web.zip"), zip(&files)?))
 }
 

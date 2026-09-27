@@ -1,4 +1,4 @@
-> **Status:** steps 3 and 7 are built; the rest is not started. Written 2026-09-05 from the Godot parity
+> **Status:** steps 3, 7 and 8 are built; the rest is not started. Written 2026-09-05 from the Godot parity
 > investigation: the renderer draws every node it is handed, once, from one
 > camera, into the window.
 
@@ -54,9 +54,8 @@ reference says on the function.
 **Instancing is automatic.** Renderables sharing a mesh asset and a material
 draw as one call with per-instance model matrices in a storage buffer,
 grouped in the material pipeline the engine already owns. A script wanting a
-hundred thousand instances gets `multimesh`: the mesh, a count, and
-`set_instance(i, pose, color)` on the handle, which is Godot's
-`MultiMeshInstance` without the resource.
+hundred thousand instances gets Godot's `MultiMesh`: a `multimesh` asset
+drawn by `multimesh3d` or `multimesh2d`, built in `docs/PLAN-multimesh.md`.
 
 **Level of detail is the mesh asset's.** `lods = [{ source, distance }]` in
 the definition, so an imported model carries its own chain, and `balaur
@@ -71,14 +70,14 @@ mesh.
 | Perspective and orthographic cameras, field of view, clip planes | Step 1: `camera.projection`, `fov`, `near`, `far`, `size`, applied through the fork's `new_with_frustum`; `render.set_camera` keeps taking eye and target |
 | Skipping nodes outside the camera | Step 1: frustum culling in 3D, rect culling in 2D, from bounds; `render.in_view`, `on_view_entered` / `on_view_exited`. A chunked tile map and a voxel volume cull per chunk, over the chunks `docs/PLAN-tilemap.md` step 2 and `docs/PLAN-voxels.md` step 2 give them |
 | Visibility layers | Step 2: `cull_mask` on `camera` and `viewport`, over the `layers` `docs/PLAN-3d-rendering.md` step 1 puts on lights and renderables |
-| Repeated meshes in one call | Step 3: automatic instancing over `balaur_render::instancing`, the seam the authored `cloner` draws through; this is the same seam applied to whatever the scene repeats |
+| Repeated meshes in one call | Step 3: automatic instancing over `balaur_render::instancing`, the seam `multimesh3d` draws through; this is the same seam applied to whatever the scene repeats |
 | Anti-aliasing | Step 4: `viewport.msaa`, and `[render] msaa` in `project.toml` for the window's own view; FXAA and sharpening are `docs/PLAN-3d-rendering.md` step 5 |
 | Split screen | Step 4: `viewport` with `rect`, `camera`, `cull_mask`, `clear`, `msaa`, `update = "always" \| "once" \| "visible"`; input per view through `render.mouse_ray(view)` |
 | A camera on a texture | Step 5: `viewport.target = "texture"`, `size`, referenced as `view:<path>` |
 | Picture-in-picture | Step 5: a `viewport` on an `image` widget |
 | Level of detail | Step 6: `lods` on the mesh asset, `lod_bias` on `mesh`, `range` and `range_fade` on renderables, `balaur import --lods` through `meshopt` (C bindings, the constraint) |
 | Many sprites in one call | Step 7: 2D batching by texture and material in the sync |
-| Scripted mass instancing | Step 8: `multimesh`, the scripted twin of the `cloner` component: a count and `set_instance(i, pose, color)` where the cloner has a mode and a seed |
+| Scripted mass instancing | Step 8: the `multimesh` asset, `multimesh3d` and `multimesh2d`, and `set_instance_transform(i, t)`, in `docs/PLAN-multimesh.md` |
 | Occlusion culling | Roadmap 0.9: frustum and distance first, then a software depth rasteriser. A scene big enough to ask for it is what that milestone is |
 | Render scale and sharpening | Step 4: `viewport.scale`, `sharpen` through the fork's CAS pass |
 | Stereo views for XR | The roadmap's XR item; step 4's hook is the half it reuses |
@@ -92,7 +91,7 @@ mesh.
 5. `viewport` to a texture.
 6. Level of detail and ranges.
 7. 2D batching. **Built**, and 3a says what it holds to.
-8. `multimesh`.
+8. `multimesh`. **Built**, in `docs/PLAN-multimesh.md`.
 
 ## 3a. What 2D batching has to do
 

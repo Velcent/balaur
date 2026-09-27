@@ -28,7 +28,7 @@ One real game, counted rather than guessed.
 | `Node2D`, `Node`, `Marker2D` | 377, 59, 46 | a node with a `transform` and nothing else |
 | `Label`, `Button`, `TextureRect` | 255, 210, 186 | `widget` kinds `label`, `button`, `image` |
 | `HBoxContainer`, `VBoxContainer` | 174, 164 | `widget` kinds `row`, `column` |
-| `AnimationPlayer`, `AnimationLibrary` | 146, 111 | `animation` over `animation_clip` assets |
+| `AnimationPlayer`, `AnimationLibrary` | 146, 111 | `animation` over `animation_library` assets |
 | `PackedScene` references | 149 | `instance`, with `overrides` per path |
 | `Polygon2D` | 91 | `polygon` |
 | `ShaderMaterial`, `Shader` | 87, 48 | `material`, over a WESL port of the `.gdshader` |
@@ -43,7 +43,7 @@ One real game, counted rather than guessed.
 | `RichTextLabel` | 7 | a `label` with `markup = true` |
 | `ProgressBar`, `HSlider`, `OptionButton` | 7, 4, 8 | `progress`, `slider`, `dropdown` |
 | `CanvasLayer` | 6 | `ui.set_widget_layer` and `node.z_index` |
-| `MultiMeshInstance2D`, `MultiMesh` | 3, 3 | `cloner` |
+| `MultiMeshInstance2D`, `MultiMeshInstance3D`, `MultiMesh` | 3, 0, 3 | `multimesh2d` and `multimesh3d` over an inline `multimesh`, its `buffer` read into instances |
 | `RemoteTransform2D` | 4 | `modifier2d` of kind `follow` |
 | `AnimationTree`, `AnimationNodeStateMachine` | 2, 2 | `state_machine` over a `state_machine` asset |
 | `Window`, `SpinBox`, `TextureButton` | 1, 1, 1 | `window`, `field` with `numeric`, an `image` with `on_click` |
@@ -76,12 +76,12 @@ are dictionary data and translation sources.
 | `SpriteFrames` | The `sprite_sheet` asset | `docs/generated/assets.md` |
 | `Polygon2D` skinned by `Skeleton2D` | `polygon.skeleton` over `bone2d` | `polygon.rs`, `skeleton.rs` |
 | `PackedScene` instance and its overrides | `instance` and `overrides."Path".component` | `examples/hello/scenes/main.toml` |
-| `AnimationPlayer` value tracks | `animation_clip` tracks, `component/property` | `crates/balaur_anim/src/clip.rs:85` |
-| `Tween` | `animation.tween`, `tween_to`, `tween_value` | `crates/balaur_anim/src/tween.rs` |
-| `signal` and `.connect` | `events.emit` and `events.subscribe` | script API `events` |
+| `AnimationPlayer` value tracks | `animation_library` tracks, `component/property` | `crates/balaur_animation/src/clip.rs:85` |
+| `Tween` | `animation.tween`, `tween_to`, `tween_value` | `crates/balaur_animation/src/tween.rs` |
+| `signal` and `.connect` | `events.emit` and `events.listen` | script API `events` |
 | `TranslationServer.tr` | `strings.tr` over `strings/<locale>.toml` | script API `strings` |
 | Input map | `[input.actions]` in `project.toml` | `examples/hello/project.toml` |
-| Audio buses | `audio.buses`, `audio.set_bus_volume` | script API `audio` |
+| Audio buses | `audio.buses`, `audio.set_bus_volume_linear` | script API `audio` |
 | `HTTPRequest`, `WebSocketPeer` | `http`, `websocket` | script API |
 | `FileAccess`, `DirAccess` | `fs` | script API |
 | `JSON`, `Marshalls` | `json`, `encoding` | script API |
@@ -113,7 +113,7 @@ the way it already folded `visible` and `z_index`. So the propagation that
 existed carries it, and nothing new walks the tree. The scene key is
 `tint` beside `visible`, written `[r, g, b, a]` or `#rrggbb` /
 `#rrggbbaa`; the script API is `node.tint`, `node.set_tint` and
-`node.global_tint`; and the renderers multiply their own colour by it — 2D
+`node.effective_tint`; and the renderers multiply their own colour by it — 2D
 sprites and shapes, 3D meshes, world text, particles and, since a map had no
 colour at all before, tile maps.
 
@@ -460,7 +460,7 @@ the second run that day, largest first:
 | Unequal margins on a MarginContainer | 5 | built |
 | `z_index`, `scale` on a Control, `update_position` as tracks | 16 tracks | planned |
 | Built-in signals nothing here emits: `gui_input`, `visibility_changed`, `tab_changed` | 7 | their rows wait on a script's `emit` |
-| `MultiMeshInstance2D`, `VSplitContainer`, `AnimatedSprite2D` | 5 | the `cloner`, a split kind, a `sprite_sheet` |
+| `VSplitContainer`, `AnimatedSprite2D` | 2 | a split kind, a `sprite_sheet` |
 
 What is left between this table and a game that plays, in order, is
 `docs/PLAN-polyglot-port.md`.

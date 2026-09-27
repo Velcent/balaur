@@ -96,6 +96,24 @@ pub struct SettingsRegistry(pub Vec<SettingDef>);
 #[derive(Default)]
 pub struct SettingsValues(pub toml::value::Table);
 
+/// How many times a setting was defined, set, cleared or loaded.
+#[derive(Default)]
+pub struct SettingsRevision(pub u64);
+
+fn moved(eng: &Engine) {
+    if let Some(revision) = eng.try_resource::<SettingsRevision>() {
+        revision.borrow_mut().0 += 1;
+    }
+}
+
+/// A count that moves with every change to what is defined or held, so a
+/// screen listing settings rebuilds its rows when it moves, not every frame.
+#[must_use]
+pub fn revision(eng: &Engine) -> u64 {
+    eng.try_resource::<SettingsRevision>()
+        .map_or(0, |revision| revision.borrow().0)
+}
+
 pub fn define(eng: &Engine, def: SettingDef) {
     if let Some(registry) = eng.try_resource::<SettingsRegistry>() {
         let mut registry = registry.borrow_mut();
@@ -107,12 +125,13 @@ pub fn define(eng: &Engine, def: SettingDef) {
             registry.0.push(def);
         }
     }
+    moved(eng);
 }
 
 /// Define a group at once: every key in `schema` becomes `<prefix>/<key>`.
 ///
 /// A key may itself contain slashes, so one block can declare
-/// `appearance/theme` and `sessions/keep` under the same prefix.
+/// `appearance/theme` and `recordings/keep` under the same prefix.
 pub fn define_group(eng: &Engine, prefix: &str, scope: Scope, schema: &toml::Value) {
     let Some(table) = schema.as_table() else {
         return;
@@ -243,8 +262,8 @@ pub fn set(eng: &Engine, path: &str, value: toml::Value) {
     let Some((tables, key)) = split(path) else {
         return;
     };
-    let mut values = values.borrow_mut();
-    table_at(&mut values.0, &tables).insert(key.to_string(), value);
+    table_at(&mut values.borrow_mut().0, &tables).insert(key.to_string(), value);
+    moved(eng);
 }
 
 /// The table `tables` names under `root`, made on the way down; a value
@@ -272,6 +291,7 @@ pub fn load(eng: &Engine, text: &str) -> Result<()> {
     if let Some(values) = eng.try_resource::<SettingsValues>() {
         merge(&mut values.borrow_mut().0, parsed);
     }
+    moved(eng);
     Ok(())
 }
 
@@ -426,8 +446,8 @@ pub fn clear(eng: &Engine, path: &str) {
     let Some((tables, key)) = split(path) else {
         return;
     };
-    let mut values = values.borrow_mut();
-    table_at(&mut values.0, &tables).remove(key);
+    table_at(&mut values.borrow_mut().0, &tables).remove(key);
+    moved(eng);
 }
 
 /// The text one scope's settings would write, starting from `existing` so
@@ -586,11 +606,14 @@ pub(crate) fn build_core_settings(eng: &Engine) {
             r#"
 name = { type = "string", default = "", order = 1, help = "The game's name, used for its window title and its data directory." }
 main_scene = { type = "string", default = "", order = 2, help = "The scene a run opens with." }
-language = { type = "enum", default = "rune", options = ["rune"], order = 3, applies = "restart", help = "Which scripting language this project is written in." }
-assets = { type = "enum", default = "files", options = ["files", "embedded", "embeddedthenfiles"], order = 4, applies = "restart", help = "Where a shipped game may read its bytes from. Only bites once packed; a dev run always reads the source tree." }
+script_language = { type = "enum", default = "rune", options = ["rune"], order = 3, applies = "restart", help = "Which scripting language this project is written in." }
+asset_source = { type = "enum", default = "files", options = ["files", "embedded", "embedded_then_files"], order = 4, applies = "restart", help = "Where a shipped game may read its bytes from. Only bites once packed; a dev run always reads the source tree." }
 splash = { type = "string", default = "", order = 5, applies = "restart", help = "A project-relative picture shown over the first frames, on every target. Empty shows none." }
-splash_seconds = { type = "float", default = 1.5, min = 0.0, max = 60.0, order = 6, applies = "restart", help = "How long the splash stays, in seconds of engine time, and the least it stays when a script is reporting a load through `ui.set_loading`." }
+splash_seconds = { type = "float", default = 1.5, min = 0.0, max = 60.0, order = 6, applies = "restart", help = "How long the splash stays, in seconds of engine time, and the least it stays when a script is reporting a load through `ui.set_load_progress`." }
 ignore = { type = "list", of = { type = "string" }, default = [], order = 7, applies = "restart", help = "Project paths that are not the game's, as globs: `art/wip/**`, `**/*.blend1`. The asset index skips them and a pack leaves them out." }
+icon = { type = "string", default = "", order = 8, applies = "restart", help = "A project-relative square picture, a PNG or an SVG, that every export writes as that platform's app icon, and the window shows while the game runs. 1024 pixels is what a store asks for." }
+icon_dark = { type = "string", default = "", order = 9, applies = "restart", help = "The icon's form for a dark system: the dark appearance on iOS and macOS, the favicon a dark browser shows, and the window icon while `dark_mode()` is true." }
+icon_monochrome = { type = "string", default = "", order = 10, applies = "restart", help = "A single-colour form, white on transparency, that iOS and macOS tint and Android 13 draws in the themed launcher." }
 "#,
         ),
     );
@@ -604,7 +627,7 @@ ignore = { type = "list", of = { type = "string" }, default = [], order = 7, app
             "settings.save",
             r#"
 version = { type = "int", default = 1, min = 1, max = 9999, help = "The save version this build writes. A lower file is migrated; a higher one is refused." }
-migrate = { type = "string", default = "", help = "A script whose migrate_save(version, data) brings a file forward one version per call." }
+migrate_script = { type = "string", default = "", help = "A script whose migrate_save(version, data) brings a file forward one version per call." }
 "#,
         ),
     );
@@ -615,7 +638,7 @@ migrate = { type = "string", default = "", help = "A script whose migrate_save(v
         &parse(
             "settings.locale",
             r#"
-default = { type = "string", default = "en", help = "The locale a fresh run starts in." }
+initial = { type = "string", default = "en", help = "The locale a fresh run starts in." }
 fallback = { type = "string", default = "en", help = "Where a key missing from the current locale is looked for next." }
 "#,
         ),
@@ -627,9 +650,9 @@ fallback = { type = "string", default = "en", help = "Where a key missing from t
         &parse(
             "settings.multiplayer",
             r#"
-faults = { type = "bool", default = false, order = 1, help = "Put delay, jitter and packet loss on every multiplayer link, to test rollback against a link that misbehaves." }
-delay = { type = "int", default = 9, min = 0, max = 60, order = 2, help = "Ticks every payload waits before delivery. Nine is about 150 ms at 60 Hz." }
-jitter = { type = "int", default = 3, min = 0, max = 30, order = 3, help = "Extra ticks drawn per payload. Jitter is what reorders a stream." }
+simulate_faults = { type = "bool", default = false, order = 1, help = "Put delay, jitter and packet loss on every multiplayer link, to test rollback against a link that misbehaves." }
+delay_ticks = { type = "int", default = 9, min = 0, max = 60, order = 2, help = "Ticks every payload waits before delivery. Nine is about 150 ms at 60 Hz." }
+jitter_ticks = { type = "int", default = 3, min = 0, max = 30, order = 3, help = "Extra ticks drawn per payload. Jitter is what reorders a stream." }
 loss = { type = "float", default = 0.05, min = 0.0, max = 1.0, order = 4, help = "The fraction of datagrams dropped. Datagrams only: losing a reliable payload would break the transport's contract." }
 "#,
         ),
@@ -644,20 +667,21 @@ loss = { type = "float", default = 0.05, min = 0.0, max = 1.0, order = 4, help =
         &parse(
             "settings.editor.appearance",
             r#"
-theme = { type = "enum", default = "dark", options = ["dark", "light"], order = 1, help = "Which chrome the editor wears: dark, light, or a theme in the per-user themes folder, which Settings lists by name." }
-ui_scale = { type = "float", default = 1.25, min = 0.75, max = 2.5, order = 2, applies = "restart", help = "How large the editor's own text and controls are drawn." }
-compact = { type = "bool", default = false, order = 3, help = "Drop labels the icon already says, for a narrow window." }
+theme = { type = "enum", default = "balaur", options = ["balaur", "atom-one", "catppuccin", "dracula", "everforest", "github", "gruvbox", "kanagawa", "rose-pine", "solarized", "tokyo-night"], order = 1, help = "Which theme the editor wears: a bundled one, or a folder in the per-user themes folder, which Settings lists by name. Each has a dark and a light half." }
+mode = { type = "enum", default = "system", options = ["system", "dark", "light"], order = 2, help = "Which half of the theme the editor wears: the one the system is in, or always dark or always light." }
+ui_scale = { type = "float", default = 1.25, min = 0.75, max = 2.5, order = 3, applies = "restart", help = "How large the editor's own text and controls are drawn." }
+compact = { type = "bool", default = false, order = 4, help = "Drop labels the icon already says, for a narrow window." }
 "#,
         ),
     );
     define_group(
         eng,
-        "editor/sessions",
+        "editor/recordings",
         Scope::Editor,
         &parse(
-            "settings.editor.sessions",
+            "settings.editor.recordings",
             r#"
-keep = { type = "int", default = 10, min = 1, max = 200, order = 10, help = "How many recorded play sessions are kept per game before the oldest is pruned." }
+keep = { type = "int", default = 10, min = 1, max = 200, order = 10, help = "How many recordings are kept per game before the oldest is pruned." }
 verify = { type = "bool", default = false, order = 11, help = "Hash the world every tick while recording, so a replay can say where it parted. Costs a walk of every node per frame." }
 "#,
         ),
@@ -693,10 +717,10 @@ pixels_per_unit = { type = "float", default = 100.0, min = 0.01, order = 8, appl
         &parse(
             "settings.import.audio",
             r#"
-volume = { type = "float", default = 1.0, min = 0.0, max = 4.0, order = 1, applies = "restart", help = "Every sound's own level, multiplied into each play of it. A file's sidecar sets its own." }
+volume_linear = { type = "float", default = 1.0, min = 0.0, max = 4.0, order = 1, applies = "restart", help = "Every sound's own level, multiplied into each play of it. A file's sidecar sets its own." }
 loop = { type = "bool", default = false, order = 2, applies = "restart", help = "Loop every sound wherever it is played. A music folder usually sets this per file instead." }
-mono = { type = "bool", default = false, order = 3, applies = "restart", help = "Mix every WAV to one channel at export, which halves a stereo file. A sound played from a place in the world is heard mono anyway." }
-max_rate = { type = "int", default = 0, min = 0, max = 192000, order = 4, applies = "restart", help = "The highest sample rate a WAV ships at, in Hz; 0 keeps each file's own. 22050 is plenty for most effects. Set it per target to ship a phone less." }
+force_mono = { type = "bool", default = false, order = 3, applies = "restart", help = "Mix every WAV to one channel at export, which halves a stereo file. A sound played from a place in the world is heard mono anyway." }
+max_rate_hz = { type = "int", default = 0, min = 0, max = 192000, order = 4, applies = "restart", help = "The highest sample rate a WAV ships at, in Hz; 0 keeps each file's own. 22050 is plenty for most effects. Set it per target to ship a phone less." }
 "#,
         ),
     );
@@ -762,6 +786,7 @@ orientation = { type = "enum", default = "any", options = ["any", "portrait", "l
 vsync = { type = "bool", default = true, order = 5, applies = "restart", help = "Present in step with the display." }
 msaa = { type = "int", default = 1, min = 1, max = 4, order = 6, applies = "restart", help = "Samples per pixel. 1 is off and 4 is the only other count the renderer offers; it costs two render targets of four samples each." }
 max_fps = { type = "int", default = 0, min = 0, max = 1000, order = 7, applies = "restart", help = "The most frames a second the loop draws. Zero paces it against the tick instead, which is what vsync already does on a display that runs at the tick rate." }
+low_processor = { type = "bool", default = false, order = 8, applies = "restart", help = "Run a frame only when something asks for one: input, ui.request_repaint, a log line, a changed file or work finished on another thread. What a tool that sits still wants; a game that moves every frame leaves it off." }
 "#,
         ),
     );
@@ -776,9 +801,9 @@ system_fonts = { type = "bool", default = true, applies = "restart", help = "App
 theme = { type = "string", default = "", help = "A project-relative `widget_theme` every widget starts from, as Godot's project theme is. A widget that names its own `theme` still dresses its subtree with that one." }
 scale = { type = "float", default = 1.0, min = 0.25, max = 3.0, help = "How large the game's own UI is drawn, as egui's zoom factor: every control and every font together, on top of the display's own scale. A phone usually wants more than a desktop, which is what `[override.mobile.ui] scale` is for. `ui.set_scale` changes it later." }
 system_text_size = { type = "bool", default = true, applies = "restart", help = "Multiply the scale by the size the reader asked their system for. Off for a game whose layout cannot give text more room." }
-narrow_below = { type = "float", default = 600.0, min = 1.0, max = 8192.0, applies = "restart", help = "Under this many design pixels of width a layout reads `narrow`: one column, one panel at a time. Android's own line between its compact and medium window classes." }
-wide_from = { type = "float", default = 840.0, min = 1.0, max = 8192.0, applies = "restart", help = "From this many design pixels of width a layout reads `wide` and may spread out. Between the two lines it reads `medium`." }
-short_below = { type = "float", default = 480.0, min = 1.0, max = 8192.0, applies = "restart", help = "Under this many design pixels of height a layout reads `short`, which is a phone on its side." }
+narrow_below_pixels = { type = "float", default = 600.0, min = 1.0, max = 8192.0, applies = "restart", help = "Under this many design pixels of width a layout reads `narrow`: one column, one panel at a time. Android's own line between its compact and medium window classes." }
+wide_from_pixels = { type = "float", default = 840.0, min = 1.0, max = 8192.0, applies = "restart", help = "From this many design pixels of width a layout reads `wide` and may spread out. Between the two lines it reads `medium`." }
+short_below_pixels = { type = "float", default = 480.0, min = 1.0, max = 8192.0, applies = "restart", help = "Under this many design pixels of height a layout reads `short`, which is a phone on its side." }
 "#,
         ),
     );
@@ -787,7 +812,7 @@ short_below = { type = "float", default = 480.0, min = 1.0, max = 8192.0, applie
 /// The faults the `multiplayer` settings ask for, or `None` when they are off.
 #[must_use]
 pub fn faults(eng: &Engine) -> Option<crate::transport::Faults> {
-    if !get(eng, "multiplayer/faults")?.as_bool()? {
+    if !get(eng, "multiplayer/simulate_faults")?.as_bool()? {
         return None;
     }
     // `as_f64`, not `as_float`: a tick count is an integer in the file and in
@@ -799,8 +824,8 @@ pub fn faults(eng: &Engine) -> Option<crate::transport::Faults> {
         reason = "a tick count from a bounded setting"
     )]
     Some(crate::transport::Faults {
-        delay: number("multiplayer/delay").unwrap_or(0.0) as u32,
-        jitter: number("multiplayer/jitter").unwrap_or(0.0) as u32,
+        delay: number("multiplayer/delay_ticks").unwrap_or(0.0) as u32,
+        jitter: number("multiplayer/jitter_ticks").unwrap_or(0.0) as u32,
         loss: number("multiplayer/loss").unwrap_or(0.0) as f32,
     })
 }

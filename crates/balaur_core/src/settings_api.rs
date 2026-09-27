@@ -38,9 +38,10 @@ pub fn install_settings_api(m: &mut dyn Bindings<Engine>) {
         ("known_tags", &[], "()", "Every tag a project may write an override for: the engine's, then the project's own from `[export] tags`."),
         ("overrides", &[], "(path: string)", "The tags this project holds an override for at `path`, in tag order."),
         ("clear", &[], "(path: string)", "Forget one value, so the next write drops the key: how an override is removed."),
+        ("revision", &[], "()", "A count that moves whenever a setting is defined, set, cleared or loaded: a screen listing settings rebuilds its rows when it moves, not every frame."),
         ("set", &[], "(path: string, value: any)", "Change one setting, in memory. Whether it takes effect now or on the next run is the setting's own business; `all` reports it as `applies`."),
         ("define", &[], "(path: string, spec: table)", "Declare a setting of your own: `type`, `default`, and optionally `min`, `max`, `options`, `help`, `order` and `applies`. A path starting `editor/` is kept on this machine; anything else ships with the game."),
-        ("load", &[], "(text: string)", "Read values out of a TOML text, folding them onto what is already loaded."),
+        ("merge_toml", &[], "(text: string)", "Read values out of a TOML text, folding them onto what is already loaded."),
         ("to_toml", &[], "(scope: string, existing: string)", "The text one scope would write, starting from `existing` so anything no setting describes survives. Scope is \"project\" or \"editor\"."),
     ]);
     m.function("all", |eng: &Engine, (): ()| {
@@ -70,6 +71,11 @@ pub fn install_settings_api(m: &mut dyn Bindings<Engine>) {
     install_override_api(m);
     m.function("set", |eng: &Engine, (path, value): (String, Value)| {
         settings::set(eng, &path, to_toml(&value)?);
+        let change = Value::Map(vec![
+            ("path".into(), Value::text(path)),
+            ("value".into(), value),
+        ]);
+        crate::facts::notice(eng, crate::hooks::ON_SETTING_CHANGED, change);
         Ok(Value::Nil)
     });
     m.function("define", |eng: &Engine, (path, spec): (String, Value)| {
@@ -86,7 +92,7 @@ pub fn install_settings_api(m: &mut dyn Bindings<Engine>) {
         );
         Ok(Value::Nil)
     });
-    m.function("load", |eng: &Engine, text: String| {
+    m.function("merge_toml", |eng: &Engine, text: String| {
         settings::load(eng, &text)?;
         Ok(Value::Nil)
     });
@@ -136,5 +142,10 @@ fn install_override_api(m: &mut dyn Bindings<Engine>) {
     m.function("clear", |eng: &Engine, path: String| {
         settings::clear(eng, &path);
         Ok(Value::Nil)
+    });
+    m.function("revision", |eng: &Engine, (): ()| {
+        Ok(Value::Int(
+            i64::try_from(settings::revision(eng)).unwrap_or(i64::MAX),
+        ))
     });
 }

@@ -73,7 +73,9 @@ already does; ungroup is the reverse. Align and distribute are six commands
 over world positions along one axis, in the palette and a toolbar. Hide,
 lock and isolate are editor state on the mirror: hidden writes `visible`,
 locked is a set the gizmos and box select skip, isolate hides everything not
-selected until toggled.
+selected until toggled. The outliner shows both on the row: an eye on every
+node, open or closed, and a lock at the right of a locked one. A click on
+either acts on that node alone and leaves the selection as it was.
 
 **The outliner filters with the search everyone else uses.** A field at the
 top of the tree using `search.rn`, plus a component filter chip — cameras,
@@ -155,10 +157,10 @@ All eight built, 2026-09-07, in this order, with the engine work each stood on
 built beside it.
 
 1. **Selection.** *Built.* `selection.rn`, `arrange.rn`, box select in both
-   viewports, a gizmo drag over the set. The `seldemo` state asserts a two-node
+   viewports, a gizmo drag over the set. The `test:selection` state asserts a two-node
    align and its undo.
 2. **Finding and dropping.** *Built.* Facet chips in `left.rn`, `dropin.rn`,
-   and `import_api.rs` for the seam `balaur import` never had. `dropdemo`.
+   and `import_api.rs` for the seam `balaur import` never had. `test:drop`.
 3. **Seeing.** *Built.* `overlays::lights3d`, the view-mode chip and four
    camera bookmarks in `center.rn`, over `light3d` and `environment`.
 4. **Pen.** *Built.* `pen.rn`, over `path2d`. Two engine defects came out of
@@ -169,10 +171,10 @@ built beside it.
    the inspector's material rows, which resolve an inline material too, with a
    shader picker and the `@if` flags as toggles. No preview sphere.
 6. **Events.** *Built.* `bindings.rs`, `states.rs`, `variables.rs` and the
-   hook dispatch in `balaur::interact`; `events.rn` authors them. `eventsdemo`.
+   hook dispatch in `balaur::interact`; `events.rn` authors them. `test:events`.
 7. **Cost.** *Built.* `render.stats` and the Cost dock.
 8. **Library.** *Built.* `editor/library`, the dock, and
-   `balaur new --template`. `librarydemo`.
+   `balaur new --template`. `test:library`.
 
 ## 4. What CI can prove, and what it cannot
 

@@ -43,6 +43,12 @@ What the tree already stands on, and the 2026-09-07 plan missed:
   `handle` on a row is a split; `group` on a `check` is the radio row; an
   `image` naming `on_click` is a picture button; `source` on a `button` is
   its picture; `window` drags by its bar and closes by its cross.
+- **The UI comes before the world.** A press is routed once, from the top:
+  an open dialog, a popup or window, a widget not marked
+  `interactive = false` or a seam `splitter_width` makes, and the world
+  last. The answer holds until the button is up; the world's pointer hooks
+  hear only what reached it, and `ui::wants_pointer` and
+  `ui::takes_pointer_at` read it from any script (`routing.rs`).
 
 ## 1. What is missing, in five batches
 
@@ -129,6 +135,11 @@ its body by `ScrollArea::show_rows` as the other two do, rather than by the
   the script's; `egui_dnd` stays unnecessary for the same reason. It is not
   the drag and drop batch's `drop`: this one never leaves the widget, and that
   one is a payload from anywhere to anywhere.
+- **Marks at a row's right.** A sixth field on a `list` or `tree` row holds
+  its marks, each `name=glyph` from the icon face and joined on U+001E, drawn
+  in from the right edge in the widget's ink. `on_mark` hears `#{ row, mark }`
+  for the one clicked, and the click picks no row. The outliner's eye and lock
+  are two of them.
 - **One row or many, read the same way.** `selection` carries what the widget
   holds whether it holds one row or several, so nothing reading it back
   branches on `multi`; `text` is the row last clicked, which is where a shift

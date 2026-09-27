@@ -61,7 +61,7 @@ fi
 step "stage"
 bundle="$dist/balaur-editor-$target"
 rm -rf "$bundle"
-mkdir -p "$bundle/templates"
+mkdir -p "$bundle/runtimes"
 cp "$bin" "$bundle/balaur$exe"
 cp -R editor "$bundle/editor"
 cp -R examples "$bundle/examples"
@@ -74,7 +74,7 @@ cp crates/balaur_plugin/include/balaur_extension.h "$bundle/include/"
 # The runtime template is the same binary: a game is this program with a pack
 # appended, so there is nothing to build twice.
 cp "$bin" "$dist/balaur-runtime-$target$exe"
-cp "$bin" "$bundle/templates/balaur-runtime-$target$exe"
+cp "$bin" "$bundle/runtimes/balaur-runtime-$target$exe"
 
 step "smoke: export a game with the template and run it"
 # The template is found next to the *executable*, not the working directory,
@@ -82,6 +82,8 @@ step "smoke: export a game with the template and run it"
 smoke="$dist/.smoke"
 rm -rf "$smoke"
 "$bundle/balaur$exe" new "$smoke/project" >/dev/null
+# With an icon, so a Windows game runs with the resources the export rewrote.
+./scripts/with_icon.sh "$smoke/project"
 "$bundle/balaur$exe" export "$smoke/project" --target "$target" -o "$smoke/game$exe" >/dev/null
 [ -f "$smoke/game$exe" ] || { printf '::error::export produced no game\n'; exit 1; }
 out=$(BALAUR_FRAMES=60 "$smoke/game$exe" 2>&1) || {

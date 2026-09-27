@@ -30,6 +30,7 @@ pub(crate) enum Platform {
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum Capability {
     /// Sign in with Apple: `com.apple.developer.applesignin`.
+    #[serde(rename = "sign-in-with-apple")]
     Applesignin,
     /// Game Center: `com.apple.developer.game-center`.
     GameCenter,
@@ -43,7 +44,7 @@ pub(crate) enum Capability {
 impl Capability {
     const fn name(self) -> &'static str {
         match self {
-            Self::Applesignin => "applesignin",
+            Self::Applesignin => "sign-in-with-apple",
             Self::GameCenter => "game-center",
             Self::IcloudKv => "icloud-kv",
             Self::InAppPurchase => "in-app-purchase",
@@ -83,9 +84,9 @@ pub(crate) enum PlistValue {
 /// ```toml
 /// [apple]
 /// bundle_id = "com.studio.game"
-/// team = "AB12CD34EF"
-/// min_os = "15.0"
-/// capabilities = ["applesignin", "game-center", "icloud-kv"]
+/// team_id = "AB12CD34EF"
+/// min_ios = "15.0"
+/// capabilities = ["sign-in-with-apple", "game-center", "icloud-kv"]
 ///
 /// [apple.plist]
 /// ITSAppUsesNonExemptEncryption = false
@@ -99,17 +100,25 @@ pub(crate) struct AppleConfig {
     /// The ten-character team identifier. Xcode expands
     /// `$(TeamIdentifierPrefix)` from it; nothing expands anything here, so
     /// an entitlement that carries the prefix needs the real value.
-    pub team: String,
+    pub team_id: String,
     pub display_name: String,
     pub version: String,
-    pub build: String,
+    pub build_number: String,
     /// `MinimumOSVersion` on iOS.
-    pub min_os: String,
+    pub min_ios: String,
     /// `LSMinimumSystemVersion` on macOS.
     pub min_macos: String,
     /// macOS only: `LSApplicationCategoryType`.
     pub category: String,
     pub capabilities: Vec<Capability>,
+    /// `Developer ID Application: …` for a download, `Apple Distribution: …`
+    /// for the Mac App Store.
+    pub macos_identity: String,
+    /// Submit to Apple's notary service after signing, and staple the ticket.
+    pub notarize: bool,
+    pub ios_identity: String,
+    /// A project-relative `.mobileprovision`, copied into the bundle.
+    pub ios_provisioning_profile: String,
     /// Keys merged into `Info.plist` as written. The exporter writes the
     /// plist whole, so a key it does not know goes here rather than into the
     /// template.
@@ -125,17 +134,21 @@ impl Default for AppleConfig {
     fn default() -> Self {
         Self {
             bundle_id: String::new(),
-            team: String::new(),
+            team_id: String::new(),
             display_name: String::new(),
             version: "1.0".into(),
-            build: "1".into(),
-            // The templates are built for these (scripts/package_template.sh,
+            build_number: "1".into(),
+            // The templates are built for these (scripts/package_runtime.sh,
             // scripts/package.sh), which is where StoreKit 2 starts; a plist
             // may not claim less than the binary was built for.
-            min_os: "15.0".into(),
+            min_ios: "15.0".into(),
             min_macos: "12.0".into(),
             category: String::new(),
             capabilities: Vec::new(),
+            macos_identity: String::new(),
+            notarize: false,
+            ios_identity: String::new(),
+            ios_provisioning_profile: String::new(),
             plist: BTreeMap::new(),
             orientation: balaur::project::Orientation::Any,
         }
@@ -199,7 +212,7 @@ impl AppleConfig {
             format!(
                 "[apple] {} = \"{declared}\" is not a version",
                 match platform {
-                    Platform::Ios => "min_os",
+                    Platform::Ios => "min_ios",
                     Platform::Macos => "min_macos",
                 }
             )
@@ -215,9 +228,9 @@ impl AppleConfig {
                 );
             }
         }
-        if self.capabilities.contains(&Capability::IcloudKv) && self.team.is_empty() {
+        if self.capabilities.contains(&Capability::IcloudKv) && self.team_id.is_empty() {
             bail!(
-                "[apple] icloud-kv needs `team`: the key-value store identifier is \
+                "[apple] icloud-kv needs `team_id`: the key-value store identifier is \
                  <team>.<bundle_id>, and nothing expands $(TeamIdentifierPrefix) outside Xcode"
             );
         }
@@ -226,7 +239,7 @@ impl AppleConfig {
 
     fn deployment(&self, platform: Platform) -> &str {
         match platform {
-            Platform::Ios => &self.min_os,
+            Platform::Ios => &self.min_ios,
             Platform::Macos => &self.min_macos,
         }
     }
@@ -252,7 +265,7 @@ impl AppleConfig {
                         body,
                         "  <key>com.apple.developer.ubiquity-kvstore-identifier</key>\n  \
                          <string>{}.{}</string>\n",
-                        self.team, self.bundle_id
+                        self.team_id, self.bundle_id
                     );
                 }
                 // In-app purchase needs no entitlement; it is a capability
@@ -273,7 +286,14 @@ impl AppleConfig {
     ///
     /// `executable` is the binary's file name inside the bundle, which on iOS
     /// is still the template's; `name` is the game's.
-    pub(crate) fn info_plist(&self, platform: Platform, executable: &str, name: &str) -> String {
+    /// `icon_keys` are the lines the icon writer answered, already plist.
+    pub(crate) fn info_plist(
+        &self,
+        platform: Platform,
+        executable: &str,
+        name: &str,
+        icon_keys: &str,
+    ) -> String {
         let display = if self.display_name.is_empty() {
             name
         } else {
@@ -286,12 +306,12 @@ impl AppleConfig {
         string_key(&mut body, "CFBundleDisplayName", display);
         string_key(&mut body, "CFBundlePackageType", "APPL");
         string_key(&mut body, "CFBundleShortVersionString", &self.version);
-        string_key(&mut body, "CFBundleVersion", &self.build);
+        string_key(&mut body, "CFBundleVersion", &self.build_number);
         match platform {
             Platform::Ios => {
                 body.push_str("  <key>LSRequiresIPhoneOS</key><true/>\n");
                 body.push_str("  <key>UILaunchScreen</key><dict/>\n");
-                string_key(&mut body, "MinimumOSVersion", &self.min_os);
+                string_key(&mut body, "MinimumOSVersion", &self.min_ios);
                 // A project naming the key itself is left alone: it may want
                 // an order or a set this one window setting cannot say.
                 if !self.plist.contains_key(ORIENTATIONS) {
@@ -305,6 +325,7 @@ impl AppleConfig {
                 }
             }
         }
+        body.push_str(icon_keys);
         for (k, v) in &self.plist {
             let _ = write!(body, "  <key>{}</key>", escape(k));
             body.push_str(&plist_value(v, 1));
@@ -420,6 +441,20 @@ mod tests {
             .apple
     }
 
+    #[test]
+    fn the_apple_table_names_its_signing_identities() {
+        let apple = config(
+            "[apple]\nmacos_identity = \"Developer ID Application: Studio\"\nnotarize = true\n\
+             ios_provisioning_profile = \"signing/game.mobileprovision\"\n",
+        );
+        assert_eq!(apple.macos_identity, "Developer ID Application: Studio");
+        assert!(apple.notarize);
+        assert_eq!(
+            apple.ios_provisioning_profile,
+            "signing/game.mobileprovision"
+        );
+    }
+
     /// `[window] orientation` lands in the plist iOS reads, and a project
     /// that names the key itself keeps its own answer.
     #[test]
@@ -428,7 +463,7 @@ mod tests {
             orientation: balaur::project::Orientation::Portrait,
             ..AppleConfig::default()
         };
-        let text = held.info_plist(Platform::Ios, "Balaur", "Tide");
+        let text = held.info_plist(Platform::Ios, "Balaur", "Tide", "");
         assert!(
             text.contains("<key>UISupportedInterfaceOrientations</key>"),
             "{text}"
@@ -436,7 +471,7 @@ mod tests {
         assert!(text.contains("UIInterfaceOrientationPortrait"), "{text}");
         assert!(!text.contains("LandscapeLeft"), "{text}");
 
-        let none = AppleConfig::default().info_plist(Platform::Ios, "Balaur", "Tide");
+        let none = AppleConfig::default().info_plist(Platform::Ios, "Balaur", "Tide", "");
         assert!(!none.contains("UISupportedInterfaceOrientations"), "{none}");
 
         let named = AppleConfig {
@@ -446,7 +481,7 @@ mod tests {
                  UISupportedInterfaceOrientations = [\"UIInterfaceOrientationLandscapeLeft\"]\n",
             )
         };
-        let text = named.info_plist(Platform::Ios, "Balaur", "Tide");
+        let text = named.info_plist(Platform::Ios, "Balaur", "Tide", "");
         assert!(text.contains("LandscapeLeft"), "{text}");
         assert!(!text.contains("UIInterfaceOrientationPortrait"), "{text}");
     }
@@ -491,13 +526,13 @@ mod tests {
             .check(Platform::Ios)
             .expect_err("nothing expands $(TeamIdentifierPrefix) here")
             .to_string();
-        assert!(err.contains("team"), "{err}");
+        assert!(err.contains("team_id"), "{err}");
     }
 
     #[test]
     fn game_center_below_the_version_its_identity_signature_needs_is_refused() {
         let config = config(
-            "[apple]\nbundle_id = \"com.studio.game\"\nmin_os = \"13.0\"\n\
+            "[apple]\nbundle_id = \"com.studio.game\"\nmin_ios = \"13.0\"\n\
              capabilities = [\"game-center\"]\n",
         );
         let err = config
@@ -510,9 +545,9 @@ mod tests {
     #[test]
     fn every_capability_writes_its_own_entitlement() {
         let config = config(
-            "[apple]\nbundle_id = \"com.studio.game\"\nteam = \"AB12CD34EF\"\n\
-             min_os = \"15.0\"\n\
-             capabilities = [\"applesignin\", \"game-center\", \"icloud-kv\"]\n",
+            "[apple]\nbundle_id = \"com.studio.game\"\nteam_id = \"AB12CD34EF\"\n\
+             min_ios = \"15.0\"\n\
+             capabilities = [\"sign-in-with-apple\", \"game-center\", \"icloud-kv\"]\n",
         );
         config.check(Platform::Ios).expect("a complete table");
         let text = config.entitlements().expect("three capabilities");
@@ -528,11 +563,11 @@ mod tests {
     fn the_plist_carries_the_projects_identifier_and_its_own_keys() {
         let config = config(
             "[apple]\nbundle_id = \"com.studio.game\"\ndisplay_name = \"My Game\"\n\
-             version = \"2.1\"\nbuild = \"7\"\nmin_os = \"15.0\"\n\
+             version = \"2.1\"\nbuild_number = \"7\"\nmin_ios = \"15.0\"\n\
              [apple.plist]\nITSAppUsesNonExemptEncryption = false\n\
              UISupportedInterfaceOrientations = [\"UIInterfaceOrientationLandscapeLeft\"]\n",
         );
-        let text = config.info_plist(Platform::Ios, "Balaur", "game");
+        let text = config.info_plist(Platform::Ios, "Balaur", "game", "");
         assert!(text.contains("<key>CFBundleIdentifier</key><string>com.studio.game</string>"));
         assert!(text.contains("<key>CFBundleDisplayName</key><string>My Game</string>"));
         assert!(text.contains("<key>CFBundleShortVersionString</key><string>2.1</string>"));
@@ -544,7 +579,7 @@ mod tests {
     #[test]
     fn a_macos_plist_declares_its_own_minimum_and_no_iphone_keys() {
         let config = config("[apple]\nbundle_id = \"com.studio.game\"\nmin_macos = \"13.0\"\n");
-        let text = config.info_plist(Platform::Macos, "game", "game");
+        let text = config.info_plist(Platform::Macos, "game", "game", "");
         assert!(text.contains("<key>LSMinimumSystemVersion</key><string>13.0</string>"));
         assert!(!text.contains("LSRequiresIPhoneOS"), "{text}");
     }
@@ -552,7 +587,7 @@ mod tests {
     #[test]
     fn in_app_purchase_writes_no_entitlement_and_still_checks_the_version() {
         let below = config(
-            "[apple]\nbundle_id = \"com.studio.game\"\nmin_os = \"14.0\"\n\
+            "[apple]\nbundle_id = \"com.studio.game\"\nmin_ios = \"14.0\"\n\
              capabilities = [\"in-app-purchase\"]\n",
         );
         let err = below
@@ -574,5 +609,23 @@ mod tests {
     #[test]
     fn a_capability_is_spelled_the_way_the_entitlement_is() {
         assert_eq!(Capability::GameCenter.name(), "game-center");
+    }
+
+    /// The name a message prints is the one a project writes: the settings
+    /// screen offers these, and a spelling that did not read back would be
+    /// refused at export.
+    #[test]
+    fn every_capability_reads_back_from_the_name_it_prints() {
+        for capability in [
+            Capability::Applesignin,
+            Capability::GameCenter,
+            Capability::IcloudKv,
+            Capability::InAppPurchase,
+        ] {
+            let text = format!("capabilities = [\"{}\"]", capability.name());
+            let read: toml::Table = toml::from_str(&text).unwrap();
+            let parsed: Vec<Capability> = read["capabilities"].clone().try_into().unwrap();
+            assert_eq!(parsed, [capability]);
+        }
     }
 }

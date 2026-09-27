@@ -31,8 +31,8 @@ pub fn align(S, axis, mode) {
         log::info("align needs two or more nodes");
         return;
     }
-    let lo = math::INF;
-    let hi = -math::INF;
+    let lo = math::INFINITY;
+    let hi = -math::INFINITY;
     let sum = 0.0;
     for i in rows {
         let v = world_of(S, i)[axis];
@@ -104,7 +104,7 @@ pub fn group(S) {
     }
     for i in rows {
         if model::is_instanced(S.doc[i]) {
-            log::warn("cannot group inside an instance; open its prefab to change its structure");
+            log::warn("cannot group inside a prefab; open it to change its structure");
             return;
         }
     }
@@ -157,7 +157,7 @@ pub fn ungroup(S) {
     let i = S.sel;
     let node = S.doc[i];
     if model::is_instanced(node) {
-        log::warn("cannot ungroup inside an instance");
+        log::warn("cannot ungroup inside a prefab");
         return;
     }
     let id = node.get("id").unwrap_or("");
@@ -192,13 +192,21 @@ pub fn ungroup(S) {
     history::commit(S);
 }
 
+pub fn toggle_hidden(S) {
+    toggle_hidden_of(S, selection::all(S));
+}
+
+/// Whether a node says it is hidden: its own `visible`, whatever its parent's.
+pub fn is_hidden(S, i) {
+    S.doc[i].get("visible") == Some(false)
+}
+
 /// Flip `visible` on the whole set: if anything is showing, hide it all;
 /// otherwise show it all. Written to the document, so it survives a save.
-pub fn toggle_hidden(S) {
-    let rows = selection::all(S);
+pub fn toggle_hidden_of(S, rows) {
     let any_visible = false;
     for i in rows {
-        if S.doc[i].get("visible").unwrap_or(true) != false {
+        if !is_hidden(S, i) {
             any_visible = true;
         }
     }
@@ -231,7 +239,10 @@ pub fn show_all(S) {
 /// Locks are editor state, so no history step: undoing a lock would be
 /// undoing something the file never saw.
 pub fn toggle_locked(S) {
-    let rows = selection::all(S);
+    toggle_locked_of(S, selection::all(S));
+}
+
+pub fn toggle_locked_of(S, rows) {
     let any_free = false;
     for i in rows {
         if !selection::is_locked(S, i) {

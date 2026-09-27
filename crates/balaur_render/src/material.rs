@@ -137,6 +137,10 @@ pub struct Material3d {
 /// The feature a material names to be handed a colour per vertex.
 pub const VERTEX_COLOR: &str = "vertex_color";
 
+/// The feature a material names to be handed a multimesh instance's four
+/// floats of custom data, Godot's `INSTANCE_CUSTOM`.
+pub const INSTANCE_CUSTOM: &str = "instance_custom";
+
 impl Material3d {
     /// The image each texture slot is bound to, in [`TEXTURE_SLOTS`] order;
     /// `None` for a slot this material left out.
@@ -178,6 +182,15 @@ impl Material3d {
         self.features
             .iter()
             .any(|(name, on)| name == VERTEX_COLOR && *on)
+    }
+
+    /// Whether `features` asks for each instance's custom data, which the
+    /// pipeline then carries as one more per-instance attribute.
+    #[must_use]
+    pub fn reads_instance_custom(&self) -> bool {
+        self.features
+            .iter()
+            .any(|(name, on)| name == INSTANCE_CUSTOM && *on)
     }
 }
 
@@ -533,6 +546,8 @@ pub(crate) fn register_material_component(reg: &mut Registry<'_>) {
     reg.register_component(
         MATERIAL_COMPONENT,
         ComponentDef {
+            events: &[],
+            warnings: None,
             doc: "`source` is the `material` asset this node and everything under it draw with. A renderable's own `material` property overrides it for that node alone.",
             schema: ComponentDef::parse_schema(
                 MATERIAL_COMPONENT,
