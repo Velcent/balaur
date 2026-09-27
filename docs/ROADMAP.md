@@ -46,6 +46,10 @@ A row is **one sentence and at most 25 words**, and `scripts/prose_lints.py`
 fails over either. It says what the thing is, not how it is built: that is the plan it
 links to, and for a built row the posts the site pairs with it.
 
+A row is also a feature big enough for a devlog post of its own. A smaller
+change, an icon format or one more module, belongs to the row it serves, or to
+no row: the page is a list of what the engine can do, not of every commit.
+
 The engine is at **0.2.0**, one version for the workspace; `v0.1.0` is tagged
 and published. A release is a `v*` tag: bump `[workspace.package] version`, and
 rewrite that milestone's rows as what landed rather than striking them, so a
@@ -91,7 +95,6 @@ being built, marked `done`, never back in the shipped one.
 | **Scenes, assets and packs** — prefabs with per-path overrides, `id://` references that survive a rename, import settings beside each file, and sha256-verified binary packs. | 0.1 done | no plan |
 | **A bad call caught before it runs** — `balaur check` reads the scene beside the script and resolves a component's method against the table the run time uses. | 0.2 done | [PLAN-script-analysis.md](PLAN-script-analysis.md) |
 | **Addons as modules** — a file directly under `addons/<name>/` is `<name>::<file>` in every script, its functions and constants reached by path, in `balaur_script_rune`. | 0.2 done | no plan |
-| **Regular expressions** — a `regex` module over `regex-lite`: `search`, `search_all`, `replace`, `split` and `escape`, with a match as a table. | 0.2 done | [PLAN-polyglot-port.md](PLAN-polyglot-port.md) |
 | **FBX import** — `balaur import` over the `ufbx` crate, for the meshes, rigs and clips that never ship as glTF. | 0.7 | no plan |
 | **Godot import** — `balaur import` over `project.godot`, `.tscn`, `.tres` and `.gdshader`, writing scenes, assets, script bodies and a report naming what did not convert. | 0.2 done | [PLAN-godot-import.md](PLAN-godot-import.md) |
 | **Asset streaming** — a load that runs off the tick, a scene added to one already running, and an asset dropped when nothing names it. | 0.6 | no plan |
@@ -131,7 +134,6 @@ being built, marked `done`, never back in the shipped one.
 | Item | Milestone | Plan |
 | --- | :-: | --- |
 | **Interactivity without a script** — hooks, states, scene variables and the binding rows the Bindings view authors over them, so a scene reacts with no `.rn` beside it. | 0.1 done | no plan |
-| **An event a script can finish** — a hook that answers `true` stops the broadcast, and a press reaches the node under the pointer and then every other node. | 0.2 done | [PLAN-interactivity.md](PLAN-interactivity.md) |
 | **One way to hear every event** — `events::announce` reaches hooks, rows, listeners and awaits alike, for physics, animation, widgets, the tree, the app and the network. | 0.2 | [PLAN-events.md](PLAN-events.md) |
 | **Navigation** — a `navmesh` asset, paths over it, and `agent2d` and `agent3d` with avoidance, all on the fixed step and in the digest. | 0.5 | [PLAN-navigation.md](PLAN-navigation.md) |
 | **Voice in a match** — capture, Opus, a jitter buffer, push-to-talk, echo cancellation and positional voice, never entering the simulation or the digest. | 0.5 | [PLAN-voice.md](PLAN-voice.md) |
@@ -151,7 +153,6 @@ being built, marked `done`, never back in the shipped one.
 | **Menus, popups and tooltips** — a menu bar with submenus, a context menu a right click or a long press opens, shortcuts on rows, and a toast. | 0.2 done | [PLAN-widgets.md#menus-and-popups](PLAN-widgets.md#menus-and-popups) |
 | **Text a game can edit** — a `text_area`, a `code` kind with the editor's gutter, a `drag_value` with arrows and units, labels a drag selects, and `[url]` and `[hint]` marks. | 0.2 done | [PLAN-widgets.md#text](PLAN-widgets.md#text) |
 | **Theme states and icons** — `disabled` and `focus` tables in a `widget_theme`, and the icons a check, a spin box, a tab and a slider draw. | 0.3 | [PLAN-polyglot-port.md](PLAN-polyglot-port.md) |
-| **Pointer shape and pass-through** — a widget's `cursor` names the pointer over it, and `pointer_through` keeps `ui.wants_pointer()` false there. | 0.2 done | [PLAN-polyglot-port.md](PLAN-polyglot-port.md) |
 | **Dark mode on every platform** — `dark_mode()` and `on_dark_mode_changed` answer on Windows, Linux, iOS and Android, as on macOS and in a browser. | 0.2 done | [PLAN-editor-themes.md](PLAN-editor-themes.md#steps) |
 | **Aspect and camera containers** — an `aspect` box that holds a ratio, and a camera's texture drawn as a widget the layout sizes. | 0.3 | [PLAN-widgets.md#containers](PLAN-widgets.md#containers) |
 | **A graph canvas** — a `graph` kind of nodes, ports and links a drag connects, with pan and zoom, under both the Rune graph and the shader graph. | 0.5 | [PLAN-widgets.md#containers](PLAN-widgets.md#containers) |
@@ -176,9 +177,7 @@ can do today, in the batches it would be built in.
 | **Lit normal-mapped sprites** — 2D lights and shadows are built, and the normal map is what is left. | 0.3 | [PLAN-rendering.md](PLAN-rendering.md) |
 | **Particles in 3D** — `particles3d`, and in both dimensions: emission shapes, attractors, colliders, trails, sub-emitters, lit particles and a compute stepper. | 0.3 | [PLAN-particles.md](PLAN-particles.md) |
 | **2D batching** — `balaur_render` draws the sprites and shapes that share a texture and a material in one call rather than one each. | 0.2 done | [PLAN-views-and-culling.md](PLAN-views-and-culling.md) |
-| **Automatic instancing** — meshes sharing geometry, a texture and a material draw as one call with an instance each. | 0.2 done | [PLAN-views-and-culling.md](PLAN-views-and-culling.md) |
 | **Culling and level of detail** — frustum culling and `render.in_view`, cull masks, MSAA, and level of detail in the mesh asset. | 0.3 | [PLAN-views-and-culling.md](PLAN-views-and-culling.md) |
-| **Godot's MultiMesh** — a `multimesh` asset drawn by `multimesh3d` and `multimesh2d` in one call, with per-instance custom data, Godot import and Populate. | 0.3 done | [PLAN-multimesh.md](PLAN-multimesh.md) |
 | **Voxels and terrain** — block types in a `voxel_set`, a greedy chunk mesher, a chunked grid file, a Voxels tool, `.vox` import, and heightfield meshing. | 0.3 | [PLAN-voxels.md](PLAN-voxels.md) |
 | **More than one view** — a `viewport` component for split screen, a camera rendered to a texture, and picture-in-picture. | 0.3 | [PLAN-views-and-culling.md](PLAN-views-and-culling.md) |
 | **Video playback** — a movie on a texture with its audio on a bus, render-side only. | 0.3 | no plan |
@@ -240,7 +239,6 @@ waits for its tick to settle.
 | Item | Milestone | Plan |
 | --- | :-: | --- |
 | **Export, the web and the CLI** — `balaur export` for native and web with a size report, `balaur test`, a browser editor over IndexedDB, and a benchmark suite. | 0.1 done | no plan |
-| **App icons** — `[application] icon` written as each platform wants it, with the dark and tinted forms iOS, Android and browsers read. | 0.3 done | [PLAN-editor-themes.md](PLAN-editor-themes.md#app-icons) |
 | **A splash while a game loads** — a picture over the first frames on every target, held past its seconds while a script reports what it is loading. | 0.2 done | no plan |
 | **The shell a phone has** — opening a link works on every desktop and in a browser tab, and on neither phone, which each want a call of their own. | 0.8 | [PLAN-mobile-export.md](PLAN-mobile-export.md) |
 | **One-click deploy** — a game on a URL or on a phone from one command or one button. | 0.6 | [PLAN-deploy.md](PLAN-deploy.md) |

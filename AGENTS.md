@@ -162,7 +162,10 @@ and em dashes, without failing. Run the skill itself over anything longer than
 a line before committing it, for the half a regex cannot judge.
 
 A roadmap row says what the thing is, at the level somebody using the engine
-reads. Never a date, a plan's phase number, a CI job or a defect id.
+reads. Never a date, a plan's phase number, a CI job or a defect id. It is a
+feature big enough for a devlog post of its own; smaller work belongs to the
+row it serves, or to none. The same holds for a post: one that has too little
+to say is a line in a bigger one.
 
 The row is also the card on the website's roadmap page, which is generated from
 this file. The site's generator only warns, so `scripts/prose_lints.py` is what
