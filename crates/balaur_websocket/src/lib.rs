@@ -14,27 +14,37 @@
 //! immediately, and handlers run at [`Stage::First`] of a later tick, in
 //! arrival order, never from an I/O thread.
 
-use std::sync::mpsc::{Sender, channel};
-
 use anyhow::{Result, anyhow, bail};
 use balaur_core::handler::{Handler, handler_of, headers_of, id_value, opt};
 use balaur_core::replay::ExternalIo;
+use balaur_core::wake::Commands;
 use balaur_core::{DetHashMap, Engine, Stage};
 use balaur_script::{Bindings, BindingsExt, Value};
 
+pub mod connection;
 #[cfg(not(target_family = "wasm"))]
 mod frames;
 #[cfg(not(target_family = "wasm"))]
 pub mod listener;
 pub mod transport;
 
-/// The native backend: a thread per connection.
+/// The native backend: a thread per connection, asleep until its socket or
+/// its queue wakes it.
 #[cfg(not(target_family = "wasm"))]
 mod backend {
+    use crate::SocketCommand;
     pub(crate) use crate::frames::spawn_socket;
 
     /// Threads deliver on their own; nothing to flush per tick.
     pub(crate) fn pump() {}
+
+    /// A connection's queue: a send wakes its thread.
+    pub(crate) fn queue() -> std::io::Result<(
+        balaur_core::wake::Commands<SocketCommand>,
+        balaur_core::wake::Worker<SocketCommand>,
+    )> {
+        balaur_core::wake::worker()
+    }
 }
 
 /// The browser: the WebSocket API through web-sys.
@@ -43,7 +53,20 @@ mod browser;
 
 #[cfg(target_family = "wasm")]
 mod backend {
+    use crate::SocketCommand;
     pub(crate) use crate::browser::{pump, spawn_socket};
+
+    /// A connection's queue, which `pump` drains each tick.
+    #[allow(
+        clippy::unnecessary_wraps,
+        reason = "the native backend's queue can fail; one signature for both"
+    )]
+    pub(crate) fn queue() -> std::io::Result<(
+        balaur_core::wake::Commands<SocketCommand>,
+        std::sync::mpsc::Receiver<SocketCommand>,
+    )> {
+        Ok(balaur_core::wake::queue())
+    }
 }
 
 /// How one `websocket.connect` opens its connection.
@@ -130,9 +153,13 @@ pub(crate) enum SocketEvent {
         code: u16,
         reason: String,
     },
+    /// `status` is the HTTP answer that refused the upgrade, where the
+    /// platform can see it.
     Failed {
         socket: u64,
         reason: String,
+        #[serde(default)]
+        status: Option<u16>,
     },
 }
 
@@ -142,7 +169,7 @@ pub struct WebsocketState {
     /// The worker channel, this tick's arrivals, and the rule that a replay
     /// never reaches the network — all three live in here.
     io: ExternalIo<SocketEvent>,
-    sockets: DetHashMap<u64, Sender<SocketCommand>>,
+    sockets: DetHashMap<u64, Commands<SocketCommand>>,
     handlers: DetHashMap<u64, Handler>,
     /// Where each connection is, from the events a replay reproduces rather
     /// than from the worker channels a replay never opens.
@@ -171,11 +198,22 @@ impl WebsocketState {
             format!("connect {url}"),
             Some(serde_json::json!({ "id": id, "url": url })),
         );
-        let (commands, receiver) = channel();
-        let started = self.io.start(eng, |report| {
-            backend::spawn_socket(id, url.to_string(), options, receiver, report);
+        let mut queued = None;
+        self.io.start(eng, |report| match backend::queue() {
+            Ok((commands, worker)) => {
+                backend::spawn_socket(id, url.to_string(), options, worker, report);
+                queued = Some(commands);
+            }
+            Err(err) => balaur_core::replay::report(
+                report,
+                SocketEvent::Failed {
+                    socket: id,
+                    reason: format!("no worker for the connection: {err}"),
+                    status: None,
+                },
+            ),
         });
-        if started {
+        if let Some(commands) = queued {
             self.sockets.insert(id, commands);
         }
     }
@@ -194,7 +232,7 @@ impl WebsocketState {
     fn send_command(&mut self, socket: u64, command: SocketCommand) -> bool {
         self.sockets
             .get(&socket)
-            .is_some_and(|commands| commands.send(command).is_ok())
+            .is_some_and(|commands| commands.send(command))
     }
 
     /// Ask the connection to close. The `closed` event still arrives through
@@ -205,7 +243,7 @@ impl WebsocketState {
         }
         self.sockets
             .get(&socket)
-            .is_some_and(|commands| commands.send(SocketCommand::Close).is_ok())
+            .is_some_and(|commands| commands.send(SocketCommand::Close))
     }
 
     /// Where the connection is: one of [`state`]'s words, `closed` for an id
@@ -334,11 +372,21 @@ fn event_value(event: SocketEvent) -> Value {
             ("code".into(), Value::Int(i64::from(code))),
             ("reason".into(), Value::Str(reason)),
         ],
-        SocketEvent::Failed { socket, reason } => vec![
-            ("socket".into(), id_value(socket)),
-            ("kind".into(), Value::Str(kind::ERROR.into())),
-            ("reason".into(), Value::Str(reason)),
-        ],
+        SocketEvent::Failed {
+            socket,
+            reason,
+            status,
+        } => {
+            let mut pairs = vec![
+                ("socket".into(), id_value(socket)),
+                ("kind".into(), Value::Str(kind::ERROR.into())),
+                ("reason".into(), Value::Str(reason)),
+            ];
+            if let Some(status) = status {
+                pairs.push(("status".into(), Value::Int(i64::from(status))));
+            }
+            pairs
+        }
     };
     Value::Map(pairs)
 }
@@ -415,7 +463,7 @@ fn socket_options_of(opts: Option<&Value>, config: &WebsocketConfig) -> Result<S
 /// frame arrives as `Value::Str`, a binary one as `Value::Bytes`.
 fn install_websocket_api(m: &mut dyn Bindings<Engine>) {
     m.module_doc(
-        "A long-lived socket for text or binary frames. Events reach the node's `on_websocket_event` (or `on_event`) as a map with `socket` and `kind`: `open`, `message`, `binary`, `closed` or `error`, each an `EVENT_*` constant.",
+        "A long-lived socket for text or binary frames. Events reach the node's `on_websocket_event` (or `on_event`) as a map with `socket` and `kind`: `open`, `message`, `binary`, `closed` or `error`, each an `EVENT_*` constant. An `error` carries its `reason`, and the HTTP `status` when a server refused the upgrade.",
     );
     balaur_core::handler::install_event_kinds(m, kind::ALL);
     m.describe(&[

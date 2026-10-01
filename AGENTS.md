@@ -119,6 +119,15 @@ A line opening with `-` after any block, a loop's included, **subtracts from
 it**: a bare `-1` closing a function after a `while` is `() - 1`. Write
 `return -1;`.
 
+## Threads
+
+A native thread sleeps until its work arrives: a socket ready, a command
+queued, a deadline due. It never wakes on a timer to look. A socket sits on
+`mio` with a `balaur_core::wake::Commands` queue, blocking work goes to a
+`balaur_core::task::Pool`, and a deadline asks `balaur_core::wake::at`. The
+`timed-wait` house lint fails a sleep or a socket timeout outside tests with
+no comment saying why. `docs/PLAN-io.md` has the design.
+
 ## Tests
 
 - A test's name is a sentence about behaviour: `freeing_a_node_frees_its_children`,
@@ -130,6 +139,11 @@ it**: a bare `-1` closing a function after a `while` is `() - 1`. Write
   times them badly. `scripts/bench.py --compare` reports what moved.
 - The suites that boot an app over real sockets gate on `BALAUR_E2E`, so a
   plain `cargo test` stays fast. `scripts/e2e_tests.sh` runs them.
+- The Gamend suites talk to a local Gamend on port 4000, or to `GAMEND_URL`;
+  `BALAUR_E2E_GAMEND=0` skips them. Never gamend.org: it is a live site, and
+  a ten-second stall there failed four tests on main. `gamend starter`,
+  `gamend daemon` and `gamend demo.seed` start one; CI runs the same through
+  Gamend's `setup-gamend` action.
 
 ## Writing
 
