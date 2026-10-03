@@ -23,11 +23,14 @@ mod config;
 mod debug_view;
 mod draw_2d;
 mod instancing;
+mod lens;
 pub mod light;
 pub mod light3d;
+mod lit_2d;
 pub mod material;
 mod material_check;
 mod material_compile;
+mod material_surface;
 pub mod mesh;
 /// The URL the app was launched with, taken once.
 ///
@@ -48,16 +51,22 @@ pub fn take_launch_url() -> Option<String> {
 #[cfg(feature = "window")]
 mod morph;
 mod multimesh;
+mod multimesh_api;
 mod notifier;
+pub mod overlay;
 mod particles;
+mod particles_3d;
 pub mod pick;
 mod polygon;
 mod populate;
+mod post;
 pub mod preview;
 #[cfg(feature = "window")]
 mod probe;
 pub mod reflection;
 mod script_api;
+#[cfg(test)]
+mod shader_checks;
 pub mod shaders;
 mod shape;
 mod sheet;
@@ -74,14 +83,19 @@ mod tilemap;
 mod tilemap_mesh;
 mod vocabulary;
 pub mod world_text;
-pub use camera::{Camera2d, Camera3d, Finish, Occlusion, Post, PostPass};
+pub use camera::{Camera2d, Camera3d};
 pub use debug_view::{ChannelView, PreviewRequest, ProbeReading, ProbeRequest};
+pub use lens::Lens3d;
 pub use light::{Light2d, LightKind2d, LitLight2d, Occluder2d};
 pub use multimesh::{
     Instance, MAX_INSTANCES, MULTIMESH_2D, MULTIMESH_3D, MULTIMESH_ASSET_TYPE, MeshSource,
     MultiMesh, MultiMeshAsset, Placed, buffer_of, buffer_stride, instances_from_buffer,
 };
 pub use pick::under_pointer as pick_under_pointer;
+pub use post::{
+    DepthOfField, Effects, Finish, FocusBlur, Gi, LoupeCorner, Occlusion, Post, PostPass,
+    Reflections,
+};
 
 /// The window the renderer last drew into, in logical points. Zero with no
 /// window, which is what keeps a headless run from reporting a resize.
@@ -91,12 +105,15 @@ pub fn viewport_size(eng: &Engine) -> (u32, u32) {
     let vp = vp.borrow();
     (vp.width, vp.height)
 }
-pub use light3d::{Environment, FogKind, Light3d, LightKind3d, LitLight3d, Tonemap};
+pub use light3d::{
+    AutoExposure, BlurQuality, Environment, FogKind, Light3d, LightKind3d, LitLight3d, Tonemap,
+    Transmission,
+};
 pub use mesh::MorphWeights;
 pub use notifier::ScreenNotifier2d;
 pub use particles::Particles;
 pub use polygon::PolygonMesh;
-pub use reflection::{LitProbe, ReflectionProbe};
+pub use reflection::{LitProbe, ProbeUpdate, ReflectionProbe};
 pub use sheet::{SPRITE_SHEET_ASSET_TYPE, SheetFrame, SheetSlice, SheetTag, SpriteSheet};
 pub use tilemap::{TILESET_ASSET_TYPE, TileSet, Tilemap};
 
@@ -106,6 +123,8 @@ mod app_icon;
 mod appearance;
 #[cfg(feature = "window")]
 mod bind_layout;
+#[cfg(feature = "window")]
+mod builtin_material;
 #[cfg(feature = "window")]
 mod debug_lines;
 #[cfg(feature = "window")]
@@ -157,6 +176,23 @@ mod touch_draw;
 pub struct ScreenshotRequest {
     pub path: std::path::PathBuf,
     pub after_frame: u64,
+    /// An auxiliary output of the 3D scene instead of the frame; `None` is
+    /// the picture a player sees.
+    pub aov: Option<Aov>,
+}
+
+/// What `render.snap_aov` renders the 3D scene as: kiss3d's `AovKind`, drawn
+/// for a picture rather than read as numbers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Aov {
+    /// Distance from the camera, nearest brightest.
+    Depth,
+    /// World-space normals, each axis from -1..1 into 0..255.
+    Normals,
+    /// The same in the camera's frame.
+    CameraNormals,
+    /// One colour per object id.
+    Segmentation,
 }
 
 /// What a screenshot announces to anyone listening once its file is written,
@@ -185,6 +221,7 @@ pub fn request_screenshot(eng: &balaur_core::Engine, path: std::path::PathBuf) {
     eng.insert_resource(ScreenshotRequest {
         path,
         after_frame: 0,
+        aov: None,
     });
 }
 
@@ -299,6 +336,10 @@ pub struct Renderable3d {
     /// Which light layers reach this node. A light lights it when their masks
     /// share a bit; `u32::MAX` is every layer.
     pub layers: u32,
+    /// Which cameras draw this node, by the same rule against a `camera3d`'s.
+    pub render_layers: u32,
+    /// The wireframe, vertices and node flags beside the surface.
+    pub overlay: overlay::Overlay3d,
     /// Bumped when `shape` changes so backends know to rebuild their node.
     pub version: u64,
 }
@@ -406,6 +447,11 @@ pub struct SpriteTexture {
     /// `pixels_per_unit` as authored, where 0 follows the texture's own;
     /// the renderable carries the value it resolved to.
     pub own_pixels_per_unit: f32,
+    /// `nine_slice_margins_pixels` as authored: left, right, top, bottom.
+    pub nine_slice_margins: [f32; 4],
+    /// The margins the quad is cut by, in texture pixels: the authored ones,
+    /// or a sheet slice's centre. `None` draws one plain quad.
+    pub nine: Option<[f32; 4]>,
 }
 
 impl SpriteTexture {
@@ -429,8 +475,6 @@ pub struct LineStyle {
     pub gradient: Option<[f32; 4]>,
     /// How many colours that blend steps through along the chain.
     pub gradient_steps: u32,
-    /// An image drawn along the chain, `u` in world units along it.
-    pub texture: String,
 }
 
 /// 2D renderable, mirrored into the backend's 2D scene. The node's regular
@@ -446,6 +490,9 @@ pub struct Renderable2d {
     pub line: Option<LineStyle>,
     /// What a polygon draws, present exactly when `shape` is one.
     pub polygon: Option<std::sync::Arc<PolygonMesh>>,
+    /// The image a `shape2d` draws, any kind: along a polyline `u` runs in
+    /// world units. A sprite's and a polygon's own sit beside their geometry.
+    pub texture: String,
     /// The `material` asset this draws with; empty means the built-in one.
     pub material: String,
     /// Whether the author stated the size, rather than a sprite deriving it
@@ -455,6 +502,10 @@ pub struct Renderable2d {
     /// The scale a sprite's size was derived at. Kept so `get` reports it and
     /// a patch of anything else does not re-derive the quad at the default.
     pub pixels_per_unit: f32,
+    /// The blend, wireframe, vertices and culling beside the surface.
+    pub overlay: overlay::Overlay2d,
+    /// A normal map and its shading, which draw it with `LitMaterial2d`.
+    pub lit: Option<lit_2d::Lit2d>,
     pub version: u64,
 }
 
@@ -469,9 +520,12 @@ impl Renderable2d {
             polyline: None,
             line: None,
             polygon: None,
+            texture: String::new(),
             material: String::new(),
             sized: false,
             pixels_per_unit: DEFAULT_PIXELS_PER_UNIT,
+            overlay: overlay::Overlay2d::default(),
+            lit: None,
             version: 0,
         }
     }
@@ -564,7 +618,7 @@ pub(crate) fn set_mesh(
             Renderable3d {
                 shape: Shape3d::Mesh,
                 bounds,
-                color: [0.8, 0.8, 0.8, 1.0],
+                color: [1.0, 1.0, 1.0, 1.0],
                 mesh: Some(source),
                 built: None,
                 skeleton,
@@ -572,35 +626,49 @@ pub(crate) fn set_mesh(
                 material: String::new(),
                 shadows: true,
                 layers: u32::MAX,
+                render_layers: u32::MAX,
+                overlay: overlay::Overlay3d::default(),
                 version: 0,
             },
         )
         .map_err(|_| anyhow!("node is dead"))
 }
 
-/// Whether this node casts, and which light layers reach it. A component's
-/// `apply` calls this after setting the shape, so a node with neither key
-/// keeps the defaults: it casts, and every light finds it.
-pub(crate) fn set_lighting(eng: &Engine, entity: Entity, shadows: bool, layers: u32) {
-    let world = eng.world_mut();
-    if let Ok(mut r) = world.get::<&mut Renderable3d>(entity) {
-        r.shadows = shadows;
-        r.layers = layers;
-    }
-}
-
-/// The `cast_shadow` and `light_layers` keys a 3D renderable component
-/// offers, applied to whatever renderable the node just gained.
+/// The `cast_shadow`, `light_layers`, `render_layers` and overlay keys a 3D
+/// renderable component offers, applied to whatever renderable the node just
+/// gained. A node with none of them casts, and every light and camera finds it.
 pub(crate) fn lighting_from_params(eng: &Engine, entity: Entity, params: &toml::Value) {
     let shadows = params
         .get(crate::vocabulary::keys::CAST_SHADOW)
         .and_then(toml::Value::as_bool)
         .unwrap_or(true);
-    let layers = params
-        .get(crate::vocabulary::keys::LIGHT_LAYERS)
-        .and_then(balaur_core::components::as_f64)
-        .map_or(u32::MAX, |v| v as i64 as u32);
-    set_lighting(eng, entity, shadows, layers);
+    let mask = |key: &str| {
+        params
+            .get(key)
+            .and_then(balaur_core::components::as_f64)
+            .map_or(u32::MAX, |v| v as i64 as u32)
+    };
+    let world = eng.world_mut();
+    if let Ok(mut r) = world.get::<&mut Renderable3d>(entity) {
+        r.shadows = shadows;
+        r.layers = mask(crate::vocabulary::keys::LIGHT_LAYERS);
+        r.render_layers = mask(crate::vocabulary::keys::RENDER_LAYERS);
+        r.overlay = overlay::overlay_3d(params);
+    }
+}
+
+/// The 2D overlay keys a drawable offers, onto the renderable it just gained.
+pub(crate) fn overlay_from_params(
+    eng: &Engine,
+    entity: Entity,
+    params: &toml::Value,
+) -> Result<()> {
+    let next = overlay::overlay_2d(params)?;
+    let world = eng.world_mut();
+    if let Ok(mut r) = world.get::<&mut Renderable2d>(entity) {
+        r.overlay = next;
+    }
+    Ok(())
 }
 
 pub(crate) fn set_shape(eng: &Engine, entity: Entity, shape: Shape3d) -> Result<()> {
@@ -628,10 +696,39 @@ pub(crate) fn set_shape(eng: &Engine, entity: Entity, shape: Shape3d) -> Result<
                 material: String::new(),
                 shadows: true,
                 layers: u32::MAX,
+                render_layers: u32::MAX,
+                overlay: overlay::Overlay3d::default(),
                 version: 0,
             },
         )
         .map_err(|_| anyhow!("node is dead"))
+}
+
+/// Point a 3D renderable at the image it draws, rebuilding its node when that
+/// changes.
+pub(crate) fn set_texture_3d(eng: &Engine, entity: Entity, texture: &str) -> Result<()> {
+    let world = eng.world_mut();
+    let mut r = world
+        .get::<&mut Renderable3d>(entity)
+        .map_err(|_| anyhow!("node has no 3D shape yet"))?;
+    if r.texture != texture {
+        r.texture = texture.to_string();
+        r.version += 1;
+    }
+    Ok(())
+}
+
+/// The same for a 2D shape or polyline.
+pub(crate) fn set_texture_2d(eng: &Engine, entity: Entity, texture: &str) -> Result<()> {
+    let world = eng.world_mut();
+    let mut r = world
+        .get::<&mut Renderable2d>(entity)
+        .map_err(|_| anyhow!("node has no 2D shape yet"))?;
+    if r.texture != texture {
+        r.texture = texture.to_string();
+        r.version += 1;
+    }
+    Ok(())
 }
 
 /// Point `entity` at the mesh asset its polyline draws, and set the shape.
@@ -869,7 +966,6 @@ impl balaur_plugin::Plugin for RenderPlugin {
         reg.insert_resource(ViewportSnapshot3d::default());
         reg.insert_resource(stats::Stats::default());
         reg.insert_resource(stats::Measured::default());
-        reg.insert_resource(CameraInputConfig { enabled: true });
         let mut m = reg.script_module("render")?;
         m.module_doc(
             "What a frame is made of: the shape, sprite, mesh or emitter a node draws, the 2D and 3D cameras, the backdrop, debug lines and screenshots. `window` holds the window itself.",
@@ -885,8 +981,8 @@ impl balaur_plugin::Plugin for RenderPlugin {
         material::install_material_params(&mut *m);
         shape::install_shape_api(&mut *m);
         boolean::install_boolean_api(&mut *m);
-        multimesh::install_multimesh_api(&mut *m);
-        multimesh::install_multimesh_list_api(&mut *m);
+        multimesh_api::install_multimesh_api(&mut *m);
+        multimesh_api::install_multimesh_list_api(&mut *m);
         populate::install_populate_api(&mut *m);
         light::install_occluder_api(&mut *m);
         stats::install_stats_api(&mut *m);
@@ -922,6 +1018,7 @@ impl balaur_plugin::Plugin for RenderPlugin {
         text_component::register_text3d_component(reg);
         tilemap::register_tilemap_component(reg);
         particles::register_particles_component(reg);
+        particles_3d::register_particles_3d_component(reg);
         notifier::register_notifier_component(reg);
         reg.insert_resource(particles::Bursts::default());
         reg.add_system(Stage::FixedUpdate, particles::burst_system);

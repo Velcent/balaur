@@ -533,7 +533,7 @@ fn polygon_section(S, k) {
         },
         #{
             kind: "number_field", grow: 1, value: S.polygon.tolerance,
-            step: 0.1, min: 0.0, max: 64.0, placeholder: "px",
+            drag_speed: 0.1, min: 0.0, max: 64.0, prefix: "px",
             on: |v| { S.polygon.tolerance = v; },
         },
     ]);
@@ -594,12 +594,12 @@ fn polygon_section(S, k) {
     verb_row(S, "Brush", [
         #{
             kind: "number_field", grow: 1, value: S.polygon.radius,
-            step: 0.5, min: 2.0, max: 400.0, placeholder: "px",
+            drag_speed: 0.5, min: 2.0, max: 400.0, prefix: "px",
             on: |v| { S.polygon.radius = v; },
         },
         #{
             kind: "number_field", grow: 1, value: S.polygon.strength,
-            step: 0.01, min: 0.01, max: 2.0, placeholder: "×",
+            drag_speed: 0.01, min: 0.01, max: 2.0, prefix: "×",
             on: |v| { S.polygon.strength = v; },
         },
     ]);
@@ -630,7 +630,7 @@ fn animation_section(S, k) {
     // left at 0 and 1, and naming one would clamp the clip to the other.
     push(S, #{ label: "Length", height: row_h(S), controls: [#{
         kind: "number_field", grow: 1, value: anim::length(def),
-        step: 0.01, suffix: " s",
+        drag_speed: 0.01, suffix: " s",
         on: |v| {
             def.length = util::max(0.1, v);
             anim::touch(S);
@@ -1151,7 +1151,7 @@ fn edit_float(S, k, at, spec, value) {
     push(S, #{ label: at.label, tooltip: row_tip(at, spec), controls: [#{
         kind: "number_field", grow: 1,
         value: shown_as(spec, number_of(value)),
-        step: spec.get("step").unwrap_or(0.02),
+        drag_speed: spec.get("step").unwrap_or(0.02),
         on: |v| { write_at(S, at, stored_as(spec, clamped(spec, v))); },
     }] });
 }
@@ -1160,7 +1160,7 @@ fn edit_int(S, k, at, spec, value) {
     push(S, #{ label: at.label, tooltip: row_tip(at, spec), controls: [#{
         kind: "number_field", grow: 1,
         value: number_of(value),
-        step: spec.get("step").unwrap_or(1.0),
+        drag_speed: spec.get("step").unwrap_or(1.0),
         on: |v| { write_at(S, at, math::round(clamped(spec, v)) as i64); },
     }] });
 }
@@ -1217,8 +1217,8 @@ fn edit_vector(S, k, at, spec, value) {
         controls.push(#{
             kind: "number_field", grow: 1,
             value: shown_as(spec, channel(held, slot, fallback)),
-            step: spec.get("step").unwrap_or(if datatype == "color" { 0.005 } else { 0.02 }),
-            placeholder: letters[slot],
+            drag_speed: spec.get("step").unwrap_or(if datatype == "color" { 0.005 } else { 0.02 }),
+            prefix: letters[slot],
             on: |v| {
                 let out = [];
                 for n in 0..count {
@@ -1453,7 +1453,7 @@ fn material_row(S, k, reference, name, datatype, value) {
         }
     } else if datatype == "float" {
         #{
-            kind: "number_field", grow: 1, value: util::f(value), step: 0.001,
+            kind: "number_field", grow: 1, value: util::f(value), drag_speed: 0.001,
             on: |v| { write_material_param(S, reference, name, v); },
         }
     } else if datatype == "texture" {
@@ -1483,7 +1483,7 @@ fn material_row(S, k, reference, name, datatype, value) {
             // Bound afresh: a closure made in a loop captures the binding.
             let slot = i;
             cells.push(#{
-                kind: "number_field", grow: 1, step: 0.02, placeholder: letters[slot],
+                kind: "number_field", grow: 1, drag_speed: 0.02, prefix: letters[slot],
                 value: match held.get(slot) { Some(x) => util::f(x), None => 0.0 },
                 on: |v| {
                     let out = [];
@@ -1607,13 +1607,9 @@ fn bindings_note(S, k) {
     }] });
 }
 
-/// The components a workspace shows: those on the selection carrying one of its
-/// tags, plus the ones it names outright.
-///
-/// Read from the tag rather than listed by name: a list is a second place to
-/// keep true, and the one that was here named `body` and `collider` where the
-/// engine registers `body3d` and `collider3d`, so the 3D rows never drew.
-pub fn workspace_components(S, wants) {
+/// Every component on the selection, in every workspace: a component a
+/// workspace hid read as a node with nothing on it.
+pub fn node_components(S) {
     let found_some = model::live(S, S.sel);
     if found_some.is_none() {
         found_some = rebind(S);
@@ -1621,25 +1617,10 @@ pub fn workspace_components(S, wants) {
         // Bound again, so a later failure on this row is retried afresh.
         S.rebound = -1;
     }
-    let found = match found_some {
-        Some(found) => found,
-        None => return [],
-    };
-    let out = [];
-    for name in found.component_names() {
-        if util::contains(wants.named, name) {
-            out.push(name);
-            continue;
-        }
-        let tags = util::vec(scene::component_tags(name));
-        for tag in wants.tags {
-            if util::contains(tags, tag) {
-                out.push(name);
-                break;
-            }
-        }
+    match found_some {
+        Some(found) => util::vec(found.component_names()),
+        None => [],
     }
-    out
 }
 
 // The selected row has no mirror node, so the panel would draw it as a node
@@ -1708,8 +1689,8 @@ fn ordered_components(S, names) {
 }
 
 // One auto-generated section per component present on the node.
-// `filter` limits which components a workspace shows (`None` = all).
-fn component_sections(S, k, filter) {
+fn component_sections(S, k) {
+    let all = node_components(S);
     let found = match model::live(S, S.sel) {
         Some(found) => found,
         None => return,
@@ -1732,32 +1713,19 @@ fn component_sections(S, k, filter) {
     }
     S.inspect_warned = by_prop;
     let query = crate::search::query(S, "inspector");
-    let all = util::vec(found.component_names());
-    // A component this workspace does not draw, or one the node went without
-    // because its write was refused, still says what is off, at the top.
+    // A component the node went without because its write was refused still
+    // says what is off, at the top.
     for warning in warned {
-        let shown = match filter {
-            Some(filter) => util::contains(filter, warning.component),
-            None => true,
-        };
-        let drawn = util::contains(all, warning.component) && shown;
-        if !drawn {
+        if !util::contains(all, warning.component) {
             warn_note(S, crate::lint::describe(warning));
         }
     }
     let drew = 0;
     for comp in ordered_components(S, all) {
-        let shown = match filter {
-            Some(filter) => util::contains(filter, comp),
-            None => true,
-        };
-        if !shown {
-            continue;
-        }
-        drew += 1;
         // Its rows are a table of tables, which no derived editor can draw
         // and the Events view already draws properly.
         if comp == "bindings" {
+            drew += 1;
             bindings_note(S, k);
             continue;
         }
@@ -1767,6 +1735,7 @@ fn component_sections(S, k, filter) {
         if !crate::search::matches(query, format!("{} {}", comp, props)) {
             continue;
         }
+        drew += 1;
         let key = format!("inspector/{}", comp);
         let open = !S.collapsed.contains_key(key);
         let held = comp;
@@ -1828,20 +1797,14 @@ fn component_sections(S, k, filter) {
         }
     }
     if drew == 0 {
-        empty_note(S, k, all.len(), query);
+        empty_note(S, k, all.len());
     }
 }
 
-// A panel with no section in it says which of the three reasons it is, rather
+// A panel with no section in it says which of the two reasons it is, rather
 // than reading as a node whose components went missing.
-fn empty_note(S, k, carried, query) {
-    let text = if carried == 0 {
-        "this node has no components"
-    } else if query != "" {
-        "no component matches the search"
-    } else {
-        format!("nothing on this node belongs to this workspace ({} on others)", carried)
-    };
+fn empty_note(S, k, carried) {
+    let text = if carried == 0 { "this node has no components" } else { "no component matches the search" };
     wide_row(S, row_h(S) + 2.0, || {
         style::empty(k, text);
     });
@@ -1943,7 +1906,7 @@ fn describe(S, k, node) {
             events_section(S, k);
         }
     }
-    component_sections(S, k, Some(workspace_components(S, wants)));
+    component_sections(S, k);
     for name in wants.sections {
         if name == "script" {
             script_section(S, k, "Script");

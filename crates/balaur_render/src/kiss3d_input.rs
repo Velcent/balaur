@@ -6,32 +6,19 @@ use balaur_input::InputSnapshot;
 use kiss3d::event::{Action, ImeEvent, TouchAction, WindowEvent};
 use kiss3d::window::Window;
 
-/// What arrived this frame, as the UI's pacing reads it: a pointer that only
-/// moved is the one kind of event that may leave the shell as it was.
-#[derive(Clone, Copy, Default)]
-pub(crate) struct Seen {
-    pub(crate) any: bool,
-    /// Anything but cursor movement: a key, a button, a wheel, a touch, a drop.
-    pub(crate) beyond_motion: bool,
-}
-
 /// Feed this frame's OS events into the input resource (if the input plugin
-/// is installed). Answers what arrived; without the plugin nothing counts
-/// them, so it answers as though everything did.
-pub(crate) fn pump_input(app: &App, window: &Window) -> Seen {
+/// is installed). Answers whether any arrived; without the plugin nothing
+/// counts them, so it answers as though one did.
+pub(crate) fn pump_input(app: &App, window: &Window) -> bool {
     let Some(input) = app.engine.try_resource::<InputSnapshot>() else {
-        return Seen {
-            any: true,
-            beyond_motion: true,
-        };
+        return true;
     };
     let mut input = input.borrow_mut();
     input.begin_frame();
-    let mut seen = Seen::default();
+    let mut seen = false;
     let mut closing = false;
     for event in window.events().iter() {
-        seen.any = true;
-        seen.beyond_motion |= !matches!(event.value, WindowEvent::CursorPos(_, _, _));
+        seen = true;
         if matches!(
             event.value,
             WindowEvent::Key(_, Action::Press, _)
@@ -98,8 +85,7 @@ pub(crate) fn pump_input(app: &App, window: &Window) -> Seen {
     // kiss3d has no such event on mobile.
     #[cfg(not(mobile))]
     for path in window.dropped_files() {
-        seen.any = true;
-        seen.beyond_motion = true;
+        seen = true;
         input.file_drop_event(path.to_string_lossy().into_owned());
     }
     // A chance to save, not a veto, and outside the borrow above: a handler
@@ -319,5 +305,20 @@ mod key_code_tests {
         assert_eq!(key_code(Key::A), Some("KeyA"));
         assert_eq!(key_code(Key::Return), Some("Enter"));
         assert_eq!(key_code(Key::Unknown), None);
+    }
+
+    #[test]
+    fn every_key_with_a_code_is_found_by_its_name() {
+        for key in super::EVERY_KEY {
+            if let Some(code) = key_code(key) {
+                assert!(
+                    balaur_input::is_known_key(code),
+                    "{code} is not in balaur_input's table"
+                );
+                assert_eq!(super::key_named(code), Some(key), "{code}");
+            }
+        }
+        assert_eq!(super::key_named("Enter"), Some(Key::Return));
+        assert_eq!(super::key_named("NotAKey"), None);
     }
 }
