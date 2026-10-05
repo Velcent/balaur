@@ -8,6 +8,7 @@
 # Usage: precommit.sh [--files|--lints|--full|--e2e] [--fix]
 set -uo pipefail
 cd "$(dirname "$0")/.."
+. scripts/features.sh
 
 # Monitor mode puts each stream in its own process group, so an interrupt
 # reaches the cargo tree under it rather than orphaning a build holding locks.
@@ -137,6 +138,15 @@ features_stream() {
   if [ "$(uname)" = "Darwin" ]; then
     step 'clippy apple' shape apple clippy -p balaur_apple -p balaur --features balaur/apple --all-targets -- -D warnings || bad=1
   fi
+  # The game templates package.sh builds: one physics world each, and the
+  # server with no window. Only their own build compiles that feature mix.
+  local world
+  for world in 2d 3d; do
+    step "clippy template $world" shape variant clippy -p balaur_cli --no-default-features \
+      --features "window,extensions,parallel,$(game_features $world)" -- -D warnings || bad=1
+  done
+  step 'clippy template server' shape variant clippy -p balaur_cli --no-default-features \
+    --features "$SERVER_FEATURES,extensions" -- -D warnings || bad=1
   step 'clippy greeter' cargo clippy --manifest-path examples/extension_greeter/Cargo.toml \
     --target-dir target/shape/greeter --all-targets -- -D warnings || bad=1
   # lint.yml's fourth job. Skipped rather than failed when the tool is absent,
@@ -176,17 +186,59 @@ e2e_stream() {
   return $bad
 }
 
-# The web runtime's own target and flags, from scripts/package_runtime.sh,
-# then the default features, where `window` is off: code gated on it alone
-# cannot be what an ungated module calls.
+# The web editor module's features (scripts/package_play.sh), which reach every
+# browser file; then the defaults, where `window` is off.
 wasm_stream() {
   side_env
   local bad=0
   step 'clippy wasm' shape wasm clippy --target wasm32-unknown-unknown -p balaur_cli \
-    --no-default-features --features audio,http,websocket,webtransport,gamend,multiplayer,browser,window \
+    --no-default-features --features audio,flac,mp3,mp4,vorbis,wav,http,websocket,webtransport,gamend,multiplayer,browser,window,physics2d,physics3d,import,editor \
     -- -D warnings || bad=1
   step 'clippy wasm default' shape wasm-default clippy --target wasm32-unknown-unknown \
     -p balaur_cli -- -D warnings || bad=1
+  return $bad
+}
+
+# The NDK's clang for aarch64-linux-android26, which has to build the C and C++
+# a few dependencies carry even to type-check them. Empty when there is no NDK.
+ndk_bin() {
+  local root=${ANDROID_NDK_ROOT:-${ANDROID_NDK_HOME:-}} host=linux-x86_64
+  [ "$(uname)" = "Darwin" ] && host=darwin-x86_64
+  if [ -z "$root" ]; then
+    for root in "${ANDROID_HOME:-$HOME/Library/Android/sdk}"/ndk/*; do
+      [ -d "$root/toolchains" ] && break
+    done
+  fi
+  local bin="$root/toolchains/llvm/prebuilt/$host/bin"
+  [ -x "$bin/aarch64-linux-android26-clang" ] && printf '%s' "$bin"
+}
+
+has_target() { rustup target list --installed | grep -qx "$1"; }
+
+# The Android and iOS code no host sweep compiles, then the iOS template's own
+# features. Skipped rather than failed without the target or the NDK.
+mobile_stream() {
+  side_env
+  local bad=0 bin
+  bin=$(ndk_bin)
+  if [ -n "$bin" ] && has_target aarch64-linux-android; then
+    export CC_aarch64_linux_android="$bin/aarch64-linux-android26-clang"
+    export CXX_aarch64_linux_android="$bin/aarch64-linux-android26-clang++"
+    export AR_aarch64_linux_android="$bin/llvm-ar"
+    step 'clippy android' shape android clippy --workspace --all-targets \
+      --target aarch64-linux-android -- -D warnings || bad=1
+  else
+    printf 'no Android NDK or aarch64-linux-android target, clippy android skipped\n'
+  fi
+  if [ "$(uname)" = "Darwin" ] && has_target aarch64-apple-ios; then
+    export IPHONEOS_DEPLOYMENT_TARGET=15.0
+    step 'clippy ios' shape ios clippy --workspace --all-targets \
+      --target aarch64-apple-ios -- -D warnings || bad=1
+    step 'clippy ios template' shape ios clippy -p balaur_cli --features window,apple \
+      --target aarch64-apple-ios -- -D warnings || bad=1
+  elif [ "$(uname)" = "Darwin" ]; then
+    printf 'no aarch64-apple-ios target, clippy ios skipped\n'
+  fi
   return $bad
 }
 
@@ -203,6 +255,7 @@ else
   start host host_stream
   start features features_stream
   start wasm wasm_stream
+  start mobile mobile_stream
   if [ "$mode" != "--lints" ]; then
     start shapes shapes_stream
   fi

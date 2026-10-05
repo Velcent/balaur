@@ -64,8 +64,8 @@ pub(crate) struct FrameUniforms {
     fog: [f32; 4],
     /// Whether a sky is bound, its coarsest mip, its brightness, its turn.
     environment: [f32; 4],
-    /// The viewport in pixels, how many probes are live, and whether the
-    /// resolved scene behind glass is bound.
+    /// The viewport in pixels, how many probes are live, and how many mips the
+    /// resolved scene behind glass has: none when it is not bound.
     screen_probes: [f32; 4],
     /// A world plane; a point behind it is dropped. All zero draws everything.
     clip_plane: [f32; 4],
@@ -200,13 +200,22 @@ struct Fallbacks {
 pub(crate) const SHADOW_UNIFORM_SIZE: usize =
     MAX_SHADOW_VIEWS * 64 + MAX_SHADOW_LIGHTS * 32 + 8 * 4 + 16;
 
-/// A one-texel texture of `format`, written with `texel`.
-fn one_pixel(label: &'static str, format: wgpu::TextureFormat, texel: &[u8]) -> wgpu::Texture {
+/// The layers a stand-in behind a `D2Array` binding has. GLES fixes a texture's
+/// target when it is made, and with one layer that target is not an array.
+const ARRAY_LAYERS: u32 = 2;
+
+/// A one-texel texture of `format` with `layers` layers, each written with `texel`.
+fn one_pixel(
+    label: &'static str,
+    format: wgpu::TextureFormat,
+    texel: &[u8],
+    layers: u32,
+) -> wgpu::Texture {
     let ctxt = Context::get();
     let size = wgpu::Extent3d {
         width: 1,
         height: 1,
-        depth_or_array_layers: 1,
+        depth_or_array_layers: layers,
     };
     let texture = ctxt.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
@@ -225,7 +234,7 @@ fn one_pixel(label: &'static str, format: wgpu::TextureFormat, texel: &[u8]) -> 
             origin: wgpu::Origin3d::ZERO,
             aspect: wgpu::TextureAspect::All,
         },
-        texel,
+        &texel.repeat(layers as usize),
         wgpu::TexelCopyBufferLayout {
             offset: 0,
             bytes_per_row: Some(texel.len() as u32),
@@ -245,28 +254,33 @@ impl Fallbacks {
             "mesh_environment_fallback",
             wgpu::TextureFormat::Rgba16Float,
             &[0u8; 8],
+            1,
         );
         let occlusion = one_pixel(
             "mesh_occlusion_fallback",
             wgpu::TextureFormat::R16Float,
             // f16 one: nothing is occluded.
             &0x3c00u16.to_le_bytes(),
+            1,
         );
         let probes = one_pixel(
             "mesh_probe_fallback",
             wgpu::TextureFormat::Rgba16Float,
             &[0u8; 8],
+            ARRAY_LAYERS,
         );
         let behind = one_pixel(
             "mesh_behind_fallback",
             wgpu::TextureFormat::Rgba16Float,
             &[0u8; 8],
+            1,
         );
         let shadow_atlas = one_depth_texel();
         let shadow_tint = one_pixel(
             "mesh_shadow_tint_fallback",
             wgpu::TextureFormat::Rgba8Unorm,
             &[255u8; 4],
+            ARRAY_LAYERS,
         );
         let trilinear = |label: &'static str| {
             ctxt.create_sampler(&wgpu::SamplerDescriptor {
@@ -328,7 +342,7 @@ fn array_view(label: &'static str) -> wgpu::TextureViewDescriptor<'static> {
     }
 }
 
-/// A one-texel depth texture: what stands in for the shadow atlas. A depth
+/// A one-texel depth array: what stands in for the shadow atlas. A depth
 /// format takes no write, and nothing reads it while shadows are off.
 fn one_depth_texel() -> wgpu::Texture {
     Context::get().create_texture(&wgpu::TextureDescriptor {
@@ -336,7 +350,7 @@ fn one_depth_texel() -> wgpu::Texture {
         size: wgpu::Extent3d {
             width: 1,
             height: 1,
-            depth_or_array_layers: 1,
+            depth_or_array_layers: ARRAY_LAYERS,
         },
         mip_level_count: 1,
         sample_count: 1,
@@ -513,7 +527,7 @@ impl FrameGroup {
                 viewport.0 as f32,
                 viewport.1 as f32,
                 probe_count,
-                f32::from(u8::from(self.supplied.behind.is_some())),
+                self.behind_levels(),
             ],
             clip_plane: self.clip_plane,
             lights: rows,
@@ -561,9 +575,18 @@ impl FrameGroup {
         // The window binds this between `prepare` and the refraction pass, so
         // the flag the shader reads is patched in rather than waiting for the
         // next frame's uniform: glass would spend its first frame black.
-        let live = f32::from(u8::from(self.supplied.behind.is_some()));
+        let levels = self.behind_levels();
         let offset = std::mem::offset_of!(FrameUniforms, screen_probes) + 3 * size_of::<f32>();
-        Context::get().write_buffer(&self.uniform, offset as u64, &live.to_le_bytes());
+        Context::get().write_buffer(&self.uniform, offset as u64, &levels.to_le_bytes());
+    }
+
+    /// The mips of the scene behind glass, which the shader reads because GLES
+    /// cannot ask a texture how many levels it has.
+    fn behind_levels(&self) -> f32 {
+        self.supplied
+            .behind
+            .as_ref()
+            .map_or(0.0, |view| view.texture().mip_level_count() as f32)
     }
 
     /// The shadow atlas and uniform this pass reads, which the window hands

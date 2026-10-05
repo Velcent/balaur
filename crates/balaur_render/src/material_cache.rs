@@ -118,30 +118,21 @@ macro_rules! define {
                         return Some(material.clone());
                     }
                 }
-                let features: Vec<(&str, bool)> = crate::shaders::CHANNELS
-                    .iter()
-                    .map(|c| (*c, *c == channel))
-                    .collect();
-                let built = crate::shaders::link(
-                    &[("package::channel", $channel_shader)],
-                    "package::channel",
-                    &features,
-                )
-                .and_then(|unit| crate::shaders::wgsl(&unit))
-                .map(|wgsl| {
-                    $channel_material(&crate::material::Compiled {
-                        wgsl,
-                        fields: Vec::new(),
-                        params: Vec::new(),
-                        probes: false,
-                        vertex_color: false,
-                        instance_custom: false,
-                        transparent_wgsl: None,
-                        morph: false,
+                let built = crate::shaders::channel($channel_shader, channel)
+                    .map(|wgsl| {
+                        $channel_material(&crate::material::Compiled {
+                            wgsl,
+                            fields: Vec::new(),
+                            params: Vec::new(),
+                            probes: false,
+                            vertex_color: false,
+                            instance_custom: false,
+                            transparent_wgsl: None,
+                            morph: false,
+                        })
                     })
-                })
-                .inspect_err(|why| tracing::error!(channel, "{why:#}"))
-                .ok()?;
+                    .inspect_err(|why| tracing::error!(channel, "{why:#}"))
+                    .ok()?;
                 let shared: $Shared = std::rc::Rc::new(std::cell::RefCell::new(Box::new(built)));
                 <$Manager>::get_global_manager(|manager| {
                     manager.add(shared.clone(), concat!($prefix, ":channel"));

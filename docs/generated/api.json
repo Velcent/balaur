@@ -4002,7 +4002,7 @@
       },
       "tonemap": {
         "default": "neutral",
-        "description": "The curve the HDR film is mapped through",
+        "description": "The curve the HDR film is mapped through. A scene with no `environment` node draws untonemapped",
         "options": [
           "none",
           "aces",
@@ -9117,7 +9117,7 @@
       "texture": {
         "asset": "texture",
         "default": "",
-        "description": "Image file, project-relative, or a `texture` asset that reads it with settings of its own; required",
+        "description": "Image file, project-relative, or a `texture` asset that reads it with settings of its own. Empty draws nothing",
         "type": "asset"
       },
       "wireframe_color": {
@@ -13895,7 +13895,7 @@
         "preview": "What one file becomes in a target's pack, as the Import tab shows it: `{ source, before, after, width, height, drawn_width, drawn_height, gpu_bytes }`, where `source` is the file or the variant that ships and `drawn_*` is zero unless a smaller copy does. Nil when the file does not ship there. An empty target is this machine's own.",
         "running_count": "How many exports are in flight.",
         "start": "Export the edited project for one target, on a thread. `download` allows fetching a missing template, `sign` names an identity, `output` overrides where it lands. Answers false while a recording plays.",
-        "targets": "Every target, each `{ name, bundle, installed, fetchable, note }`: whether its runtime is already here, whether a missing one could be fetched, and what a signed build of it would also need."
+        "targets": "Every target, each `{ name, runtime, bundle, installed, fetchable, note }`: the runtime the project's `[export] runtime` puts it on, whether that is already here, whether a missing one could be fetched, and what a signed build of it would also need."
       },
       "functions": [
         "listen",

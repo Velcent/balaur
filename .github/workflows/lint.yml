@@ -68,21 +68,51 @@ jobs:
       - name: Feature `apple`
         if: runner.os == 'macOS'
         run: cargo clippy -p balaur_apple -p balaur --features balaur/apple --all-targets -- -D warnings
-      # Nothing above compiles `#[cfg(target_family = "wasm")]` code, so a
-      # browser-only mistake used to reach CI as a failed download. Flags are
-      # the web runtime's, from scripts/package_runtime.sh.
+      # Nothing above compiles `#[cfg(target_family = "wasm")]` code. The web
+      # editor module's features (scripts/package_play.sh) reach every file.
       - name: Target `wasm32`
         if: runner.os == 'Linux'
         run: |
           rustup target add wasm32-unknown-unknown
           cargo clippy --target wasm32-unknown-unknown -p balaur_cli \
-            --no-default-features --features audio,http,websocket,webtransport,gamend,multiplayer,browser,window \
+            --no-default-features --features audio,flac,mp3,mp4,vorbis,wav,http,websocket,webtransport,gamend,multiplayer,browser,window,physics2d,physics3d,import,editor \
             -- -D warnings
       # The default features, where `window` is off: code gated on it alone
       # cannot be what an ungated module calls.
       - name: Target `wasm32`, default features
         if: runner.os == 'Linux'
         run: cargo clippy --target wasm32-unknown-unknown -p balaur_cli -- -D warnings
+      # The game templates scripts/package.sh builds, one physics world each and
+      # the server with no window: a feature mix no sweep above compiles.
+      - name: Template variants
+        shell: bash
+        run: |
+          . scripts/features.sh
+          for world in 2d 3d; do
+            cargo clippy -p balaur_cli --no-default-features \
+              --features "window,extensions,parallel,$(game_features $world)" -- -D warnings
+          done
+          cargo clippy -p balaur_cli --no-default-features --features "$SERVER_FEATURES,extensions" -- -D warnings
+      # Android's cfg code, which no sweep above compiles. The NDK's clang
+      # builds the C and C++ a few dependencies carry, at the template's minSdkVersion.
+      - name: Target `aarch64-linux-android`
+        if: runner.os == 'Linux'
+        run: |
+          rustup target add aarch64-linux-android
+          bin=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin
+          export CC_aarch64_linux_android=$bin/aarch64-linux-android26-clang
+          export CXX_aarch64_linux_android=$bin/aarch64-linux-android26-clang++
+          export AR_aarch64_linux_android=$bin/llvm-ar
+          cargo clippy --workspace --all-targets --target aarch64-linux-android -- -D warnings
+      # iOS's cfg code, then the iOS template's features, `window` and `apple`.
+      - name: Target `aarch64-apple-ios`
+        if: runner.os == 'macOS'
+        env:
+          IPHONEOS_DEPLOYMENT_TARGET: "15.0"
+        run: |
+          rustup target add aarch64-apple-ios
+          cargo clippy --workspace --all-targets --target aarch64-apple-ios -- -D warnings
+          cargo clippy -p balaur_cli --features window,apple --target aarch64-apple-ios -- -D warnings
       # extension_greeter is deliberately outside the workspace, so nothing
       # above reaches it. It is the only thing proving an extension builds
       # without the engine's build tree.
